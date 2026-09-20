@@ -1,46 +1,92 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from app.models.paper_analysis import PaperAnalysis
-from app.api.literature.paper_analysis import router as paper_analysis_router
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
 from app.database.database import engine, Base
 
-# Models
+
+# ============================================================
+# MODELS
+# ============================================================
+
 from app.models.research_project import ResearchProject
 from app.models.literature_paper import LiteraturePaper
+from app.models.paper_analysis import PaperAnalysis
 
-# Routers
-from app.api.projects import router as project_router
-from app.api.discovery.topics import router as discovery_router
-from app.api.literature.papers import router as literature_router
-from app.api.literature.pdf import router as pdf_router
-from app.api.literature.paper_insights import router as paper_insights_router
+
+# ============================================================
+# ROUTERS
+# ============================================================
+
+# Research Projects
+from app.api.projects import (
+    router as project_router
+)
+
+# Research Discovery
+from app.api.discovery.topics import (
+    router as discovery_router
+)
+
+# Literature Search
+from app.api.literature.papers import (
+    router as literature_router
+)
+
+# PDF Analysis
+from app.api.literature.pdf import (
+    router as pdf_router
+)
+
+# AI Paper Insights
+from app.api.literature.paper_insights import (
+    router as paper_insights_router
+)
+
+# Literature Matrix
 from app.api.literature.literature_matrix import (
     router as literature_matrix_router
 )
 
+# Saved Paper PDF Analysis
+from app.api.literature.paper_analysis import (
+    router as paper_analysis_router
+)
 
-# --------------------------------------------------
-# Create Database Tables
-# --------------------------------------------------
+# Research Gap Engine
+from app.api.literature.research_gap import (
+    router as research_gap_router
+)
 
-Base.metadata.create_all(bind=engine)
+
+# ============================================================
+# CREATE DATABASE TABLES
+# ============================================================
+
+Base.metadata.create_all(
+    bind=engine
+)
 
 
-# --------------------------------------------------
-# FastAPI Application
-# --------------------------------------------------
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="ResearchMate AI API",
     description="AI-powered Research Publication Assistant",
     version="1.0.0"
 )
-app.include_router(paper_analysis_router)
 
-# --------------------------------------------------
-# CORS Configuration
-# --------------------------------------------------
+
+# ============================================================
+# CORS CONFIGURATION
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,27 +102,85 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
-# Include Routers
-# --------------------------------------------------
+# ============================================================
+# INCLUDE ROUTERS
+# ============================================================
 
-app.include_router(project_router)
+# ------------------------------------------------------------
+# Research Projects
+# ------------------------------------------------------------
 
-app.include_router(discovery_router)
-
-app.include_router(literature_router)
-
-app.include_router(pdf_router)
-
-app.include_router(paper_insights_router)
-
-# Literature Matrix Router
-app.include_router(literature_matrix_router)
+app.include_router(
+    project_router
+)
 
 
-# --------------------------------------------------
-# Root Endpoint
-# --------------------------------------------------
+# ------------------------------------------------------------
+# Research Discovery
+# ------------------------------------------------------------
+
+app.include_router(
+    discovery_router
+)
+
+
+# ------------------------------------------------------------
+# Literature Search
+# ------------------------------------------------------------
+
+app.include_router(
+    literature_router
+)
+
+
+# ------------------------------------------------------------
+# PDF Analysis
+# ------------------------------------------------------------
+
+app.include_router(
+    pdf_router
+)
+
+
+# ------------------------------------------------------------
+# AI Paper Insights
+# ------------------------------------------------------------
+
+app.include_router(
+    paper_insights_router
+)
+
+
+# ------------------------------------------------------------
+# Saved Paper PDF Analysis
+# ------------------------------------------------------------
+
+app.include_router(
+    paper_analysis_router
+)
+
+
+# ------------------------------------------------------------
+# Literature Matrix
+# ------------------------------------------------------------
+
+app.include_router(
+    literature_matrix_router
+)
+
+
+# ------------------------------------------------------------
+# Research Gap Engine
+# ------------------------------------------------------------
+
+app.include_router(
+    research_gap_router
+)
+
+
+# ============================================================
+# ROOT ENDPOINT
+# ============================================================
 
 @app.get("/")
 def root():
@@ -86,9 +190,9 @@ def root():
     }
 
 
-# --------------------------------------------------
-# Health Check
-# --------------------------------------------------
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get("/health")
 def health_check():
@@ -97,9 +201,9 @@ def health_check():
     }
 
 
-# --------------------------------------------------
-# Database Test
-# --------------------------------------------------
+# ============================================================
+# DATABASE TEST
+# ============================================================
 
 @app.get("/db-test")
 def database_test():

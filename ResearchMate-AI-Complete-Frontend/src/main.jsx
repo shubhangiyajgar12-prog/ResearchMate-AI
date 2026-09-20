@@ -37,7 +37,7 @@ import {
 import "./index.css";
 import "./literature_clean_ui.css";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "http://127.0.0.1:8001";
 
 /* -------------------------------------------------------
    API ERROR HELPERS
@@ -2283,6 +2283,10 @@ function LiteraturePage() {
   const [matrixLoading, setMatrixLoading] = useState(false);
   const [matrixError, setMatrixError] = useState("");
 
+  const [researchGap, setResearchGap] = useState(null);
+  const [researchGapLoading, setResearchGapLoading] = useState(false);
+  const [researchGapError, setResearchGapError] = useState("");
+
   const [analyzingPaperId, setAnalyzingPaperId] = useState(null);
   const [paperAnalysisById, setPaperAnalysisById] = useState({});
   const [paperAnalysisError, setPaperAnalysisError] = useState("");
@@ -2317,7 +2321,7 @@ function LiteraturePage() {
             if (!analysisResponse.ok) return null;
 
             const analysisData = await parseApiResponse(analysisResponse);
-            return [paper.id, analysisData.analysis] ;
+            return [paper.id, analysisData.analysis];
           } catch {
             return null;
           }
@@ -2530,9 +2534,12 @@ function LiteraturePage() {
         [paperId]: data.analysis,
       }));
 
-      // Existing matrix may have been generated from older abstract-only data.
+      // Existing matrix and research-gap results may have been generated
+      // before the latest PDF analysis was available.
       setMatrix(null);
       setMatrixError("");
+      setResearchGap(null);
+      setResearchGapError("");
     } catch (err) {
       console.error(err);
       setPaperAnalysisError(
@@ -2552,6 +2559,8 @@ function LiteraturePage() {
 
     setMatrix(null);
     setMatrixError("");
+    setResearchGap(null);
+    setResearchGapError("");
   };
 
   const generateLiteratureMatrix = async () => {
@@ -2601,6 +2610,247 @@ function LiteraturePage() {
       setMatrixLoading(false);
     }
   };
+
+  const generateResearchGap = async () => {
+    if (selectedPaperIds.length < 2) {
+      setResearchGapError(
+        "Select at least 2 saved papers to generate a cross-paper research gap."
+      );
+      return;
+    }
+
+    setResearchGapLoading(true);
+    setResearchGapError("");
+    setResearchGap(null);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/literature/research-gap?project_id=${PROJECT_ID}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            paper_ids: selectedPaperIds,
+          }),
+        }
+      );
+
+      const data = await parseApiResponse(response);
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            data,
+            "Unable to generate cross-paper research gaps."
+          )
+        );
+      }
+
+      setResearchGap(data);
+    } catch (err) {
+      console.error(err);
+      setResearchGapError(
+        err.message ||
+          "Something went wrong while generating the research gap."
+      );
+    } finally {
+      setResearchGapLoading(false);
+    }
+  };
+
+  const renderResearchGapEvidence = (evidence) => {
+    if (!evidence) return null;
+
+    if (Array.isArray(evidence)) {
+      return (
+        <ul className="research-gap-evidence-list">
+          {evidence.map((item, index) => (
+            <li key={index}>{String(item)}</li>
+          ))}
+        </ul>
+      );
+    }
+
+    return <p>{String(evidence)}</p>;
+  };
+
+  // Render Research Gap results exactly once, after the Literature Matrix.
+  const renderResearchGapResults = () => {
+    if (!researchGap) return null;
+
+    const gaps =
+      researchGap.gaps ||
+      researchGap.research_gaps ||
+      researchGap.potential_research_gaps ||
+      [];
+
+    const crossPaperPatterns =
+      researchGap.cross_paper_patterns ||
+      researchGap.cross_paper_findings ||
+      researchGap.patterns ||
+      [];
+
+    const summary =
+      researchGap.summary ||
+      researchGap.overall_summary ||
+      researchGap.research_gap_summary ||
+      "";
+
+    return (
+      <section className="literature-matrix-results research-gap-results">
+        <div className="literature-matrix-header">
+          <div>
+            <span className="small-label">
+              <Sparkles size={14} />
+              AI RESEARCH GAP ANALYSIS
+            </span>
+            <h2>Cross-paper Research Gaps</h2>
+            <p>
+              ResearchMate compared the selected papers and identified
+              evidence-supported potential gaps and research opportunities.
+            </p>
+          </div>
+
+          <div className="literature-result-count">
+            <strong>{gaps.length}</strong>
+            <span>potential gaps</span>
+          </div>
+        </div>
+
+        {summary && (
+          <div className="research-gap-summary-card">
+            <div className="research-gap-summary-icon">
+              <Target size={19} />
+            </div>
+            <div>
+              <span>OVERALL SYNTHESIS</span>
+              <p>{summary}</p>
+            </div>
+          </div>
+        )}
+
+        {crossPaperPatterns.length > 0 && (
+          <div className="matrix-insight-card research-gap-patterns-card">
+            <span>CROSS-PAPER PATTERNS</span>
+            <ul>
+              {crossPaperPatterns.map((item, index) => (
+                <li key={index}>{String(item)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {gaps.length === 0 ? (
+          <div className="pdf-no-data">
+            No structured research gaps were returned by the backend.
+          </div>
+        ) : (
+          <div className="research-gap-list">
+            {gaps.map((item, index) => {
+              const gapText =
+                item?.gap ||
+                item?.research_gap ||
+                item?.title ||
+                "Potential research gap";
+
+              const evidence = item?.evidence || item?.evidence_points;
+              const affectedPapers =
+                item?.affected_papers ||
+                item?.paper_ids ||
+                item?.papers ||
+                [];
+              const evidenceStrength =
+                item?.evidence_strength ||
+                item?.strength ||
+                "Not specified";
+              const researchOpportunity =
+                item?.research_opportunity ||
+                item?.opportunity ||
+                item?.suggested_direction ||
+                "";
+
+              return (
+                <article className="research-gap-card" key={index}>
+                  <div className="research-gap-card-top">
+                    <div className="research-gap-number">
+                      {String(index + 1).padStart(2, "0")}
+                    </div>
+
+                    <div className="research-gap-card-title">
+                      <span>POTENTIAL RESEARCH GAP</span>
+                      <h3>{gapText}</h3>
+                    </div>
+
+                    <div className="research-gap-strength">
+                      <span>Evidence</span>
+                      <strong>{evidenceStrength}</strong>
+                    </div>
+                  </div>
+
+                  {evidence && (
+                    <div className="research-gap-section">
+                      <span>EVIDENCE FROM SELECTED PAPERS</span>
+                      {renderResearchGapEvidence(evidence)}
+                    </div>
+                  )}
+
+                  {affectedPapers.length > 0 && (
+                    <div className="research-gap-section">
+                      <span>AFFECTED PAPERS</span>
+                      <div className="research-gap-paper-tags">
+                        {affectedPapers.map((paperRef, paperIndex) => {
+                          const value =
+                            typeof paperRef === "object"
+                              ? paperRef?.id ||
+                                paperRef?.paper_id ||
+                                paperRef?.title ||
+                                JSON.stringify(paperRef)
+                              : paperRef;
+
+                          return (
+                            <span key={paperIndex}>
+                              Paper {String(value)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {researchOpportunity && (
+                    <div className="research-gap-opportunity">
+                      <div className="research-gap-opportunity-icon">
+                        <Sparkles size={16} />
+                      </div>
+                      <div>
+                        <span>RESEARCH OPPORTUNITY</span>
+                        <p>{researchOpportunity}</p>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="pdf-analysis-note">
+          <ShieldCheck size={18} />
+          <div>
+            <strong>Research verification note</strong>
+            <p>
+              These are potential research gaps synthesized from the selected
+              paper evidence. Verify the original papers and broader recent
+              literature before making a formal novelty or gap claim.
+            </p>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
 
   return (
     <div className="workspace-page literature-page">
@@ -3102,6 +3352,45 @@ function LiteraturePage() {
                 </div>
               </div>
             )}
+
+            <div className="research-gap-action-bar">
+              <div>
+                <strong>Research Gap Analysis</strong>
+                <span>
+                  Compare the selected papers to identify cross-paper patterns,
+                  evidence and potential research opportunities.
+                </span>
+              </div>
+
+              <button
+                className="primary-button"
+                onClick={generateResearchGap}
+                disabled={
+                  researchGapLoading || selectedPaperIds.length < 2
+                }
+              >
+                {researchGapLoading ? (
+                  <>
+                    <span className="button-spinner" />
+                    Finding Research Gaps...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={16} />
+                    Generate Research Gap
+                  </>
+                )}
+              </button>
+            </div>
+
+            {researchGapError && (
+              <div className="discovery-error literature-error">
+                <ShieldCheck size={17} />
+                {researchGapError}
+              </div>
+            )}
+
+            {researchGap && !researchGapLoading && renderResearchGapResults()}
           </>
         )}
         </div>
