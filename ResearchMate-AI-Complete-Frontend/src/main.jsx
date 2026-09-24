@@ -36,6 +36,11 @@ import {
 
 import "./index.css";
 import "./literature_clean_ui.css";
+import OriginalityPage from "./OriginalityPage";
+import WritingPage from "./WritingPage";
+import ReviewPage from "./ReviewPage";
+import PublicationAssistant from "./PublicationAssistant";
+import ConferencePage from "./ConferencePage";
 
 const API_BASE_URL = "http://127.0.0.1:8001";
 
@@ -79,15 +84,55 @@ const getApiErrorMessage = (data, fallback = "Something went wrong.") => {
   return fallback;
 };
 
-const parseApiResponse = async (response) => {
-  const contentType = response.headers.get("content-type") || "";
-
-  if (contentType.includes("application/json")) {
-    return await response.json();
+const normalizeAuthors = (authors) => {
+  if (Array.isArray(authors)) {
+    return authors
+      .map((author) => {
+        if (typeof author === "string") return author;
+        if (author?.name) return author.name;
+        if (author?.display_name) return author.display_name;
+        if (author?.author?.name) return author.author.name;
+        if (author?.author?.display_name) return author.author.display_name;
+        return null;
+      })
+      .filter(Boolean);
   }
 
+  if (typeof authors === "string") {
+    return authors
+      .split(",")
+      .map((author) => author.trim())
+      .filter(Boolean);
+  }
+
+  if (authors && typeof authors === "object") {
+    const nested = authors.authors || authors.items || authors.data;
+    if (Array.isArray(nested)) return normalizeAuthors(nested);
+
+    const name =
+      authors.name ||
+      authors.display_name ||
+      authors.author?.name ||
+      authors.author?.display_name;
+
+    return name ? [name] : [];
+  }
+
+  return [];
+};
+
+const parseApiResponse = async (response) => {
+  // Some FastAPI/proxy configurations can return JSON without a strict
+  // application/json content-type. Always read the body once and attempt
+  // JSON parsing before falling back to plain text.
   const text = await response.text();
-  return text ? { detail: text } : {};
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { detail: text };
+  }
 };
 
 /* -------------------------------------------------------
@@ -129,6 +174,11 @@ const navigation = [
     label: "Publication Assistant",
     path: "/publication",
     icon: Rocket,
+  },
+  {
+    label: "Conference Intelligence",
+    path: "/conferences",
+    icon: CalendarDays,
   },
 ];
 
@@ -318,6 +368,8 @@ function Sidebar({ mobileOpen, setMobileOpen }) {
 ------------------------------------------------------- */
 
 function Topbar({ setMobileOpen }) {
+  const [notificationCount, setNotificationCount] = React.useState(0);
+  React.useEffect(() => { fetch(`${API_BASE_URL}/notifications`).then(r=>r.json()).then(d=>setNotificationCount((d||[]).filter(n=>!n.is_read).length)).catch(()=>{}); }, []);
   return (
     <header className="topbar">
       <div className="topbar-left">
@@ -344,9 +396,9 @@ function Topbar({ setMobileOpen }) {
           <kbd>Ctrl K</kbd>
         </div>
 
-        <button className="notification-btn">
+        <button className="notification-btn" title={`${notificationCount} unread notifications`} onClick={() => window.location.assign("/conferences")}>
           <Bell size={19} />
-          <span />
+          {notificationCount > 0 && <span>{notificationCount > 9 ? "9+" : notificationCount}</span>}
         </button>
 
         <button className="profile-button">
@@ -896,7 +948,7 @@ function Discovery() {
     } catch (err) {
       console.error(err);
       setError(
-        "Backend connection failed. Make sure FastAPI is running on port 8000."
+        "Backend connection failed. Make sure FastAPI is running on port 8001."
       );
     } finally {
       setLoading(false);
@@ -2287,9 +2339,6 @@ function LiteraturePage() {
   const [researchGapLoading, setResearchGapLoading] = useState(false);
   const [researchGapError, setResearchGapError] = useState("");
 
-  const [analyzingPaperId, setAnalyzingPaperId] = useState(null);
-  const [paperAnalysisById, setPaperAnalysisById] = useState({});
-  const [paperAnalysisError, setPaperAnalysisError] = useState("");
 
   const loadSavedPapers = async () => {
     setSavedLoading(true);
@@ -2307,34 +2356,67 @@ function LiteraturePage() {
         );
       }
 
-      const papers = Array.isArray(data) ? data : [];
-      setSavedPapers(papers);
+      const papers = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.papers)
+        ? data.papers
+        : Array.isArray(data?.saved_papers)
+        ? data.saved_papers
+        : Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.results)
+        ? data.results
+        : Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data?.data?.papers)
+        ? data.data.papers
+        : Array.isArray(data?.data?.saved_papers)
+        ? data.data.saved_papers
+        : Array.isArray(data?.data?.items)
+        ? data.data.items
+        : [];
 
-      // Restore previously saved PDF analyses for this project.
-      const analysisEntries = await Promise.all(
-        papers.map(async (paper) => {
-          try {
-            const analysisResponse = await fetch(
-              `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers/${paper.id}/analysis`
-            );
+      const normalizedPapers = papers
+        .filter(Boolean)
+        .map((paper) => ({
+          ...paper,
+          id: paper.id ?? paper.paper_id ?? paper.paperId,
+          paper_id: paper.paper_id ?? paper.id ?? paper.paperId,
+          title: paper.title || paper.name || "Untitled paper",
+          authors: normalizeAuthors(paper.authors),
+        }));
 
-            if (!analysisResponse.ok) return null;
+      setSavedPapers((prev) => {
+        const refreshed = normalizedPapers.map((saved) => {
+          const localMatch = prev.find((item) =>
+            (saved.id && item.id && String(saved.id) === String(item.id)) ||
+            (saved.paper_id && item.paper_id && String(saved.paper_id) === String(item.paper_id)) ||
+            (saved.doi && item.doi && normalizePaperKey(saved.doi) === normalizePaperKey(item.doi)) ||
+            (saved.title && item.title && normalizePaperKey(saved.title) === normalizePaperKey(item.title))
+          );
 
-            const analysisData = await parseApiResponse(analysisResponse);
-            return [paper.id, analysisData.analysis];
-          } catch {
-            return null;
-          }
-        })
-      );
+          return {
+            ...(localMatch || {}),
+            ...saved,
+            paper_id: saved.paper_id || localMatch?.paper_id || null,
+          };
+        });
 
-      const analysisMap = {};
-      for (const entry of analysisEntries) {
-        if (entry) {
-          analysisMap[entry[0]] = entry[1];
+        for (const localPaper of prev) {
+          const alreadyPresent = refreshed.some((saved) =>
+            (saved.id && localPaper.id && String(saved.id) === String(localPaper.id)) ||
+            (saved.paper_id && localPaper.paper_id && String(saved.paper_id) === String(localPaper.paper_id)) ||
+            (saved.doi && localPaper.doi && normalizePaperKey(saved.doi) === normalizePaperKey(localPaper.doi)) ||
+            (saved.title && localPaper.title && normalizePaperKey(saved.title) === normalizePaperKey(localPaper.title))
+          );
+
+          if (!alreadyPresent) refreshed.push(localPaper);
         }
-      }
-      setPaperAnalysisById(analysisMap);
+
+        return refreshed;
+      });
+
+      console.info(`[Literature] Loaded ${normalizedPapers.length} saved papers for project ${PROJECT_ID}.`);
     } catch (err) {
       console.error(err);
     } finally {
@@ -2376,9 +2458,10 @@ function LiteraturePage() {
       setTotal(data.total || 0);
       setCurrentPage(data.page || page);
     } catch (err) {
-      setPapers([]);
-      setTotal(0);
-      setCurrentPage(1);
+      console.error("Literature search failed:", err);
+
+      // Keep the last successful results visible.
+      // Temporary/network errors must not erase valid results.
       setError(
         err.message || "Something went wrong while searching papers."
       );
@@ -2393,13 +2476,30 @@ function LiteraturePage() {
     }
   };
 
-  const isPaperSaved = (paper) => {
-    if (!paper?.paper_id) return false;
+  const normalizePaperKey = (value) =>
+    String(value || "")
+      .trim()
+      .toLowerCase();
 
-    return savedPapers.some(
-      (saved) => saved.paper_id === paper.paper_id
-    );
+  const isSamePaper = (saved, paper) => {
+    if (!saved || !paper) return false;
+
+    if (saved.paper_id && paper.paper_id &&
+        String(saved.paper_id) === String(paper.paper_id)) {
+      return true;
+    }
+
+    const savedDoi = normalizePaperKey(saved.doi);
+    const paperDoi = normalizePaperKey(paper.doi);
+    if (savedDoi && paperDoi && savedDoi === paperDoi) return true;
+
+    const savedTitle = normalizePaperKey(saved.title);
+    const paperTitle = normalizePaperKey(paper.title);
+    return Boolean(savedTitle && paperTitle && savedTitle === paperTitle);
   };
+
+  const isPaperSaved = (paper) =>
+    savedPapers.some((saved) => isSamePaper(saved, paper));
 
   const savePaperToProject = async (paper) => {
     if (!paper?.paper_id) {
@@ -2426,9 +2526,7 @@ function LiteraturePage() {
             title: paper.title,
             abstract: paper.abstract || null,
             year: paper.year || null,
-            authors: (paper.authors || []).map(
-              (author) => author.name || author
-            ),
+            authors: normalizeAuthors(paper.authors),
             citation_count: paper.citation_count ?? 0,
             url: paper.url || null,
             doi: paper.doi || null,
@@ -2444,7 +2542,84 @@ function LiteraturePage() {
         );
       }
 
-      await loadSavedPapers();
+      // The save API returns the canonical saved-paper record.
+      // Update local state immediately so the clicked card changes to
+      // "Saved" even if the legacy GET endpoint does not yet return
+      // the external paper_id field.
+      setSavedPapers((prev) => {
+        const savedRecord = {
+          ...(data || {}),
+          paper_id: data?.paper_id || paper.paper_id,
+          title: data?.title || paper.title,
+          abstract: data?.abstract ?? paper.abstract ?? null,
+          year: data?.year ?? paper.year ?? null,
+          authors: data?.authors ?? normalizeAuthors(paper.authors),
+        };
+
+        const exists = prev.some((saved) => isSamePaper(saved, savedRecord));
+
+        return exists
+          ? prev.map((saved) =>
+              isSamePaper(saved, savedRecord)
+                ? { ...saved, ...savedRecord }
+                : saved
+            )
+          : [savedRecord, ...prev];
+      });
+
+      // Refresh other saved-paper data without allowing an older GET
+      // response to erase the just-saved paper from the UI.
+      try {
+        const refreshResponse = await fetch(
+          `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers`
+        );
+        const refreshData = await parseApiResponse(refreshResponse);
+
+        if (refreshResponse.ok) {
+          const refreshedPayload = Array.isArray(refreshData)
+            ? refreshData
+            : Array.isArray(refreshData?.papers)
+            ? refreshData.papers
+            : Array.isArray(refreshData?.saved_papers)
+            ? refreshData.saved_papers
+            : Array.isArray(refreshData?.items)
+            ? refreshData.items
+            : Array.isArray(refreshData?.results)
+            ? refreshData.results
+            : Array.isArray(refreshData?.data)
+            ? refreshData.data
+            : Array.isArray(refreshData?.data?.papers)
+            ? refreshData.data.papers
+            : Array.isArray(refreshData?.data?.items)
+            ? refreshData.data.items
+            : [];
+
+          if (refreshedPayload.length > 0) {
+          setSavedPapers((prev) => {
+            const refreshed = refreshedPayload.map((item) => {
+              const localMatch = prev.find((saved) => isSamePaper(saved, item));
+              return {
+                ...(localMatch || {}),
+                ...item,
+                // Preserve the academic provider paper_id when the legacy
+                // GET response omits it.
+                paper_id: item.paper_id || localMatch?.paper_id || null,
+              };
+            });
+
+            for (const localPaper of prev) {
+              if (!refreshed.some((saved) => isSamePaper(saved, localPaper))) {
+                refreshed.push(localPaper);
+              }
+            }
+
+            return refreshed;
+          });
+          }
+        }
+      } catch (refreshError) {
+        console.warn("Saved papers refresh failed:", refreshError);
+      }
     } catch (err) {
       console.error(err);
       setError(
@@ -2476,12 +2651,6 @@ function LiteraturePage() {
         prev.filter((paper) => paper.id !== paperId)
       );
 
-      setPaperAnalysisById((prev) => {
-        const next = { ...prev };
-        delete next[paperId];
-        return next;
-      });
-
       setSelectedPaperIds((prev) =>
         prev.filter((id) => id !== paperId)
       );
@@ -2490,63 +2659,6 @@ function LiteraturePage() {
     } catch (err) {
       console.error(err);
       setError(err.message || "Unable to remove saved paper.");
-    }
-  };
-
-  const analyzeSavedPaperPdf = async (paperId, file) => {
-    if (!file) return;
-
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      setPaperAnalysisError("Only PDF files are supported.");
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      setPaperAnalysisError("PDF file size must be less than 10 MB.");
-      return;
-    }
-
-    setAnalyzingPaperId(paperId);
-    setPaperAnalysisError("");
-
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(
-        `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers/${paperId}/analyze-pdf`,
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
-
-      const data = await parseApiResponse(response);
-
-      if (!response.ok) {
-        throw new Error(
-          getApiErrorMessage(data, "Unable to analyze the saved paper PDF.")
-        );
-      }
-
-      setPaperAnalysisById((prev) => ({
-        ...prev,
-        [paperId]: data.analysis,
-      }));
-
-      // Existing matrix and research-gap results may have been generated
-      // before the latest PDF analysis was available.
-      setMatrix(null);
-      setMatrixError("");
-      setResearchGap(null);
-      setResearchGapError("");
-    } catch (err) {
-      console.error(err);
-      setPaperAnalysisError(
-        err.message || "Unable to analyze the saved paper PDF."
-      );
-    } finally {
-      setAnalyzingPaperId(null);
     }
   };
 
@@ -2663,67 +2775,106 @@ function LiteraturePage() {
   const renderResearchGapEvidence = (evidence) => {
     if (!evidence) return null;
 
-    if (Array.isArray(evidence)) {
-      return (
-        <ul className="research-gap-evidence-list">
-          {evidence.map((item, index) => (
-            <li key={index}>{String(item)}</li>
-          ))}
-        </ul>
-      );
-    }
+    const items = Array.isArray(evidence) ? evidence : [evidence];
 
-    return <p>{String(evidence)}</p>;
+    return (
+      <ul className="research-gap-evidence-list">
+        {items.map((item, index) => {
+          if (item && typeof item === "object") {
+            const title = item.title || item.paper_title;
+            const statement = item.statement || item.evidence || item.text;
+            return (
+              <li key={index}>
+                {title ? <strong>{title}: </strong> : null}
+                {statement ? String(statement) : JSON.stringify(item)}
+              </li>
+            );
+          }
+          return <li key={index}>{String(item)}</li>;
+        })}
+      </ul>
+    );
   };
 
-  // Render Research Gap results exactly once, after the Literature Matrix.
+  const renderResearchGapPattern = (item) => {
+    if (!item) return null;
+
+    if (typeof item === "string") {
+      return <li>{item}</li>;
+    }
+
+    const label = item.label || item.pattern || "Cross-paper pattern";
+    const evidence = item.evidence;
+    const basis = item.basis;
+
+    return (
+      <li>
+        <strong>{label}</strong>
+        {Array.isArray(evidence) ? (
+          <ul className="research-gap-pattern-details">
+            {evidence.map((entry, index) => (
+              <li key={index}>
+                {entry && typeof entry === "object"
+                  ? `${entry.title || "Paper"}${entry.category ? ` — ${entry.category}` : ""}`
+                  : String(entry)}
+              </li>
+            ))}
+          </ul>
+        ) : evidence ? (
+          <p>{String(evidence)}</p>
+        ) : null}
+        {basis ? <small>{String(basis)}</small> : null}
+      </li>
+    );
+  };
+
   const renderResearchGapResults = () => {
     if (!researchGap) return null;
 
-    const gaps =
-      researchGap.gaps ||
-      researchGap.research_gaps ||
-      researchGap.potential_research_gaps ||
-      [];
+    const gaps = Array.isArray(researchGap.gaps)
+      ? researchGap.gaps
+      : Array.isArray(researchGap.research_gaps)
+        ? researchGap.research_gaps
+        : [];
 
-    const crossPaperPatterns =
-      researchGap.cross_paper_patterns ||
-      researchGap.cross_paper_findings ||
-      researchGap.patterns ||
-      [];
+    const crossPaperPatterns = Array.isArray(researchGap.cross_paper_patterns)
+      ? researchGap.cross_paper_patterns
+      : Array.isArray(researchGap.cross_paper_findings)
+        ? researchGap.cross_paper_findings
+        : [];
 
     const summary =
-      researchGap.summary ||
       researchGap.overall_summary ||
       researchGap.research_gap_summary ||
       "";
+
+    const gapCount = Number.isFinite(Number(researchGap.gap_count))
+      ? Number(researchGap.gap_count)
+      : gaps.length;
 
     return (
       <section className="literature-matrix-results research-gap-results">
         <div className="literature-matrix-header">
           <div>
             <span className="small-label">
-              <Sparkles size={14} />
-              AI RESEARCH GAP ANALYSIS
+              EVIDENCE-BASED RESEARCH GAP ANALYSIS
             </span>
             <h2>Cross-paper Research Gaps</h2>
             <p>
-              ResearchMate compared the selected papers and identified
-              evidence-supported potential gaps and research opportunities.
+              ResearchMate checks the selected saved abstracts for explicit,
+              repeated limitation evidence. It does not treat missing
+              information as a research gap.
             </p>
           </div>
 
           <div className="literature-result-count">
-            <strong>{gaps.length}</strong>
+            <strong>{gapCount}</strong>
             <span>potential gaps</span>
           </div>
         </div>
 
         {summary && (
           <div className="research-gap-summary-card">
-            <div className="research-gap-summary-icon">
-              <Target size={19} />
-            </div>
             <div>
               <span>OVERALL SYNTHESIS</span>
               <p>{summary}</p>
@@ -2736,7 +2887,9 @@ function LiteraturePage() {
             <span>CROSS-PAPER PATTERNS</span>
             <ul>
               {crossPaperPatterns.map((item, index) => (
-                <li key={index}>{String(item)}</li>
+                <React.Fragment key={index}>
+                  {renderResearchGapPattern(item)}
+                </React.Fragment>
               ))}
             </ul>
           </div>
@@ -2744,7 +2897,13 @@ function LiteraturePage() {
 
         {gaps.length === 0 ? (
           <div className="pdf-no-data">
-            No structured research gaps were returned by the backend.
+            <strong>No explicit cross-paper research gap established.</strong>
+            <p>
+              The selected saved abstracts do not contain the repeated,
+              explicit evidence required to support a cross-paper gap claim.
+              This is different from saying that no gap exists in the
+              literature.
+            </p>
           </div>
         ) : (
           <div className="research-gap-list">
@@ -2756,15 +2915,13 @@ function LiteraturePage() {
                 "Potential research gap";
 
               const evidence = item?.evidence || item?.evidence_points;
-              const affectedPapers =
-                item?.affected_papers ||
-                item?.paper_ids ||
-                item?.papers ||
-                [];
+              const affectedPapers = Array.isArray(item?.affected_papers)
+                ? item.affected_papers
+                : Array.isArray(item?.paper_ids)
+                  ? item.paper_ids
+                  : [];
               const evidenceStrength =
-                item?.evidence_strength ||
-                item?.strength ||
-                "Not specified";
+                item?.evidence_strength || item?.strength || "Not specified";
               const researchOpportunity =
                 item?.research_opportunity ||
                 item?.opportunity ||
@@ -2801,17 +2958,18 @@ function LiteraturePage() {
                       <span>AFFECTED PAPERS</span>
                       <div className="research-gap-paper-tags">
                         {affectedPapers.map((paperRef, paperIndex) => {
-                          const value =
+                          const id =
                             typeof paperRef === "object"
-                              ? paperRef?.id ||
-                                paperRef?.paper_id ||
-                                paperRef?.title ||
-                                JSON.stringify(paperRef)
+                              ? paperRef?.id || paperRef?.paper_id
                               : paperRef;
+                          const title =
+                            typeof paperRef === "object"
+                              ? paperRef?.title || `Paper ${id}`
+                              : `Paper ${paperRef}`;
 
                           return (
-                            <span key={paperIndex}>
-                              Paper {String(value)}
+                            <span key={paperIndex} title={id ? `Saved paper ID: ${id}` : undefined}>
+                              {title}
                             </span>
                           );
                         })}
@@ -2821,10 +2979,7 @@ function LiteraturePage() {
 
                   {researchOpportunity && (
                     <div className="research-gap-opportunity">
-                      <div className="research-gap-opportunity-icon">
-                        <Sparkles size={16} />
-                      </div>
-                      <div>
+                        <div>
                         <span>RESEARCH OPPORTUNITY</span>
                         <p>{researchOpportunity}</p>
                       </div>
@@ -2837,13 +2992,11 @@ function LiteraturePage() {
         )}
 
         <div className="pdf-analysis-note">
-          <ShieldCheck size={18} />
           <div>
             <strong>Research verification note</strong>
             <p>
-              These are potential research gaps synthesized from the selected
-              paper evidence. Verify the original papers and broader recent
-              literature before making a formal novelty or gap claim.
+              {researchGap.evidence_note ||
+                "Verify the original papers and broader recent literature before making a formal research-gap or novelty claim."}
             </p>
           </div>
         </div>
@@ -2978,11 +3131,8 @@ function LiteraturePage() {
                 <div className="literature-authors">
                   <strong>Authors</strong>
                   <span>
-                    {paper.authors?.length
-                      ? paper.authors
-                          .map((author) => author.name || author)
-                          .join(", ")
-                      : "Authors unavailable"}
+                    {normalizeAuthors(paper.authors).join(", ") ||
+                      "Authors unavailable"}
                   </span>
                 </div>
 
@@ -3117,18 +3267,12 @@ function LiteraturePage() {
           </div>
         ) : (
           <>
-            {paperAnalysisError && (
-              <div className="discovery-error literature-error">
-                <ShieldCheck size={17} />
-                {paperAnalysisError}
-              </div>
-            )}
-
             <div className="saved-papers-list">
               {savedPapers.map((paper) => {
                 const selected = selectedPaperIds.includes(paper.id);
 
                 return (
+                  <>
                   <div
                     className={`saved-paper-row ${
                       selected ? "selected" : ""
@@ -3146,46 +3290,13 @@ function LiteraturePage() {
                         <strong>{paper.title}</strong>
                         <small>
                           {paper.year || "Year unavailable"} ·{" "}
-                          {paper.authors?.join(", ") ||
+                          {normalizeAuthors(paper.authors).join(", ") ||
                             "Authors unavailable"}
                         </small>
                       </span>
                     </label>
 
                     <div className="saved-paper-actions">
-                      <label className={`saved-paper-analyze ${
-                        paperAnalysisById[paper.id] ? "analyzed" : ""
-                      }`}>
-                        <input
-                          type="file"
-                          accept="application/pdf,.pdf"
-                          onChange={(event) => {
-                            const file = event.target.files?.[0];
-                            if (file) {
-                              analyzeSavedPaperPdf(paper.id, file);
-                            }
-                            event.target.value = "";
-                          }}
-                          disabled={analyzingPaperId === paper.id}
-                        />
-                        {analyzingPaperId === paper.id ? (
-                          <>
-                            <span className="button-spinner" />
-                            Analyzing...
-                          </>
-                        ) : paperAnalysisById[paper.id] ? (
-                          <>
-                            <CheckCircle2 size={14} />
-                            PDF Analyzed
-                          </>
-                        ) : (
-                          <>
-                            <FileText size={14} />
-                            Analyze PDF
-                          </>
-                        )}
-                      </label>
-
                       <button
                         className="saved-paper-remove"
                         onClick={() => removeSavedPaper(paper.id)}
@@ -3194,6 +3305,8 @@ function LiteraturePage() {
                       </button>
                     </div>
                   </div>
+
+                  </>
                 );
               })}
             </div>
@@ -3223,8 +3336,7 @@ function LiteraturePage() {
                   </>
                 ) : (
                   <>
-                    <Sparkles size={16} />
-                    Generate Literature Matrix
+                    Generate Evidence-Based Literature Matrix
                   </>
                 )}
               </button>
@@ -3232,7 +3344,6 @@ function LiteraturePage() {
 
             {matrixError && (
               <div className="discovery-error literature-error">
-                <ShieldCheck size={17} />
                 {matrixError}
               </div>
             )}
@@ -3242,13 +3353,13 @@ function LiteraturePage() {
                 <div className="literature-matrix-header">
                   <div>
                     <span className="small-label">
-                      <Sparkles size={14} />
-                      AI LITERATURE MATRIX
+                      EVIDENCE-BASED LITERATURE MATRIX
                     </span>
                     <h2>Cross-paper Research Comparison</h2>
                     <p>
-                      ResearchMate compared the selected papers using
-                      the information available in the saved records.
+                      ResearchMate compared the selected papers using only the
+                      information available in their saved records. Missing
+                      evidence is shown as unavailable instead of being inferred.
                     </p>
                   </div>
                 </div>
@@ -3318,7 +3429,11 @@ function LiteraturePage() {
                     {matrix.cross_paper_findings?.length ? (
                       <ul>
                         {matrix.cross_paper_findings.map((item, index) => (
-                          <li key={index}>{item}</li>
+                          <li key={index}>
+                            {typeof item === "object"
+                              ? (item.text || item.evidence || item.label || JSON.stringify(item))
+                              : String(item)}
+                          </li>
                         ))}
                       </ul>
                     ) : (
@@ -3331,7 +3446,16 @@ function LiteraturePage() {
                     {matrix.potential_research_gaps?.length ? (
                       <ul>
                         {matrix.potential_research_gaps.map((item, index) => (
-                          <li key={index}>{item}</li>
+                          <li key={index}>
+                            {typeof item === "object"
+                              ? (
+                                  <>
+                                    <strong>{item.title || item.type || "Potential gap signal"}</strong>
+                                    <p>{item.description || "Potential gap signal based on the selected abstract evidence."}</p>
+                                  </>
+                                )
+                              : String(item)}
+                          </li>
                         ))}
                       </ul>
                     ) : (
@@ -3341,12 +3465,11 @@ function LiteraturePage() {
                 </div>
 
                 <div className="pdf-analysis-note">
-                  <ShieldCheck size={18} />
                   <div>
                     <strong>Research verification note</strong>
                     <p>
                       {matrix.evidence_note ||
-                        "Verify AI-generated literature matrix interpretations against the original papers before using them in academic work."}
+                        "Verify the extracted evidence against the original papers before using it in academic work."}
                     </p>
                   </div>
                 </div>
@@ -3376,8 +3499,7 @@ function LiteraturePage() {
                   </>
                 ) : (
                   <>
-                    <Sparkles size={16} />
-                    Generate Research Gap
+                    Generate Evidence-Based Research Gap
                   </>
                 )}
               </button>
@@ -3385,7 +3507,6 @@ function LiteraturePage() {
 
             {researchGapError && (
               <div className="discovery-error literature-error">
-                <ShieldCheck size={17} />
                 {researchGapError}
               </div>
             )}
@@ -3504,51 +3625,24 @@ function App() {
 
             <Route
               path="/writing"
-              element={
-                <ModulePage
-                  title="Research Writing"
-                  eyebrow="RESEARCH WRITING"
-                  description="Build a strong academic manuscript with contextual writing assistance."
-                  icon={PenLine}
-                />
-              }
+              element={<WritingPage />}
             />
 
             <Route
               path="/originality"
-              element={
-                <ModulePage
-                  title="Originality & Citations"
-                  eyebrow="ORIGINALITY & CITATIONS"
-                  description="Analyze similarity, plagiarism risk and citation integrity."
-                  icon={ShieldCheck}
-                />
-              }
+              element={<OriginalityPage />}
             />
 
             <Route
               path="/review"
-              element={
-                <ModulePage
-                  title="AI Review & Improvement"
-                  eyebrow="AI REVIEW & IMPROVEMENT"
-                  description="Simulate peer review and turn reviewer feedback into actionable improvements."
-                  icon={MessageSquare}
-                />
-              }
+              element={<ReviewPage />}
             />
 
             <Route
               path="/publication"
-              element={
-                <ModulePage
-                  title="Publication Assistant"
-                  eyebrow="PUBLICATION ASSISTANT"
-                  description="Explore publication venues and manage your submission journey."
-                  icon={Rocket}
-                />
-              }
+              element={<PublicationAssistant />}
             />
+            <Route path="/conferences" element={<ConferencePage />} />
           </Routes>
         </main>
       </div>

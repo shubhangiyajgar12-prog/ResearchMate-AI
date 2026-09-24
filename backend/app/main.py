@@ -2,6 +2,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+# ============================================================
+# API MODULES
+# ============================================================
+
+from app.api import reviewer
+from app.api import improvement
+from app.api import writing
+from app.api import agents
+from app.api import publication
+
+from app.api.conferences.router import (
+    router as conference_router
+)
+
+from app.api.notifications.router import (
+    router as notification_router
+)
+
 
 # ============================================================
 # DATABASE
@@ -18,47 +36,106 @@ from app.models.research_project import ResearchProject
 from app.models.literature_paper import LiteraturePaper
 from app.models.paper_analysis import PaperAnalysis
 
+from app.models.originality_reports import OriginalityReport
+from app.models.similarity_match import SimilarityMatch
+from app.models.citation_analysis import CitationAnalysis
+
+from app.models.conference import (
+    Conference,
+    ConferenceSource
+)
+
+from app.models.notification import Notification
+
 
 # ============================================================
-# ROUTERS
+# ORIGINALITY ROUTERS
 # ============================================================
 
+from app.api.originality.similarity import (
+    router as originality_router
+)
+
+from app.api.originality.citation import (
+    router as citation_router
+)
+
+from app.api.originality.uploaded_manuscript import (
+    router as uploaded_manuscript_router
+)
+
+
+# ============================================================
+# OTHER ROUTERS
+# ============================================================
+
+# ------------------------------------------------------------
 # Research Projects
+# ------------------------------------------------------------
+
 from app.api.projects import (
     router as project_router
 )
 
+
+# ------------------------------------------------------------
 # Research Discovery
+# ------------------------------------------------------------
+
 from app.api.discovery.topics import (
     router as discovery_router
 )
 
+
+# ------------------------------------------------------------
 # Literature Search
+# ------------------------------------------------------------
+
 from app.api.literature.papers import (
     router as literature_router
 )
 
+
+# ------------------------------------------------------------
 # PDF Analysis
+# ------------------------------------------------------------
+
 from app.api.literature.pdf import (
     router as pdf_router
 )
 
+
+# ------------------------------------------------------------
 # AI Paper Insights
+# ------------------------------------------------------------
+
 from app.api.literature.paper_insights import (
     router as paper_insights_router
 )
 
+
+# ------------------------------------------------------------
 # Literature Matrix
+# ------------------------------------------------------------
+
 from app.api.literature.literature_matrix import (
     router as literature_matrix_router
 )
 
+
+# ------------------------------------------------------------
 # Saved Paper PDF Analysis
+# ------------------------------------------------------------
+
 from app.api.literature.paper_analysis import (
     router as paper_analysis_router
 )
 
+
+# ------------------------------------------------------------
 # Research Gap Engine
+# ------------------------------------------------------------
+
 from app.api.literature.research_gap import (
     router as research_gap_router
 )
@@ -90,39 +167,145 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
     ],
+
     allow_credentials=True,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# INCLUDE ROUTERS
+# INCLUDE CORE ROUTERS
 # ============================================================
 
 # ------------------------------------------------------------
-# Research Projects
+# Improvement
 # ------------------------------------------------------------
+
+app.include_router(
+    improvement.router
+)
+
+
+# ------------------------------------------------------------
+# AI Agents
+# ------------------------------------------------------------
+
+app.include_router(
+    agents.router
+)
+
+
+# ------------------------------------------------------------
+# Conferences
+# ------------------------------------------------------------
+
+app.include_router(
+    conference_router
+)
+
+
+# ------------------------------------------------------------
+# Notifications
+# ------------------------------------------------------------
+
+app.include_router(
+    notification_router
+)
+
+
+# ------------------------------------------------------------
+# Publication
+# ------------------------------------------------------------
+# IMPORTANT:
+# publication.router is included only ONCE.
+# Previously it was included twice, which caused duplicate
+# OpenAPI operation IDs in Swagger.
+
+app.include_router(
+    publication.router
+)
+
+
+# ------------------------------------------------------------
+# Writing
+# ------------------------------------------------------------
+
+app.include_router(
+    writing.router
+)
+
+
+# ------------------------------------------------------------
+# Reviewer
+# ------------------------------------------------------------
+
+app.include_router(
+    reviewer.router
+)
+
+
+# ============================================================
+# ORIGINALITY
+# ============================================================
+
+# ------------------------------------------------------------
+# Originality - Saved Paper Similarity
+# ------------------------------------------------------------
+
+app.include_router(
+    originality_router
+)
+
+
+# ------------------------------------------------------------
+# Originality - Citation Analysis
+# ------------------------------------------------------------
+
+app.include_router(
+    citation_router
+)
+
+
+# ------------------------------------------------------------
+# Originality - Uploaded Manuscript
+# ------------------------------------------------------------
+
+app.include_router(
+    uploaded_manuscript_router
+)
+
+
+# ============================================================
+# RESEARCH PROJECTS
+# ============================================================
 
 app.include_router(
     project_router
 )
 
 
-# ------------------------------------------------------------
-# Research Discovery
-# ------------------------------------------------------------
+# ============================================================
+# RESEARCH DISCOVERY
+# ============================================================
 
 app.include_router(
     discovery_router
 )
 
+
+# ============================================================
+# LITERATURE
+# ============================================================
 
 # ------------------------------------------------------------
 # Literature Search
@@ -197,7 +380,16 @@ def root():
 @app.get("/health")
 def health_check():
     return {
-        "status": "healthy"
+        "status": "healthy",
+        "service": "ResearchMate AI API",
+        "features": [
+            "rag",
+            "multi-agent",
+            "conference-intelligence",
+            "notifications",
+            "originality",
+            "citation-analysis"
+        ]
     }
 
 

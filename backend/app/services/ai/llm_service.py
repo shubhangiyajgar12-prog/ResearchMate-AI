@@ -1,157 +1,183 @@
 import os
 import time
-
+import json
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+_client = None
 
-if not GEMINI_API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY is not configured in the .env file."
+
+def _get_client():
+    global _client
+
+    if _client is not None:
+        return _client
+
+    key = os.getenv("GEMINI_API_KEY")
+
+    if not key:
+        return None
+
+    from google import genai
+
+    _client = genai.Client(api_key=key)
+
+    return _client
+
+
+def generate_text(
+    prompt: str,
+    model: str | None = None,
+    temperature: float = 0.2
+):
+    client = _get_client()
+
+    if client is None:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured. "
+            "Configure it in backend/.env to enable LLM features."
+        )
+
+    model_name = model or os.getenv(
+        "GEMINI_MODEL",
+        "gemini-2.5-flash"
     )
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+    last = None
 
-# Primary model + fallbacks.
-# All three are currently listed by Google as stable Gemini 3 Flash models.
-MODELS = [
-     "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-]
-
-# Number of attempts per model.
-MAX_RETRIES_PER_MODEL = 2
-
-
-def _is_retryable_error(error: Exception) -> bool:
-    """
-    Return True for temporary Gemini/API errors where retrying
-    or switching to another model is reasonable.
-    """
-    error_text = str(error).upper()
-
-    retryable_markers = [
-        "503",
-        "UNAVAILABLE",
-        "429",
-        "RESOURCE_EXHAUSTED",
-        "500",
-        "INTERNAL",
-        "DEADLINE_EXCEEDED",
-        "TIMEOUT",
-    ]
-
-    return any(marker in error_text for marker in retryable_markers)
-
-
-def _generate_with_model(
-    model_name: str,
-    prompt: str,
-    response_schema,
-):
-    """
-    Try one Gemini model with exponential backoff.
-    """
-    last_error = None
-
-    for attempt in range(MAX_RETRIES_PER_MODEL):
+    for attempt in range(3):
         try:
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                ),
+                config={
+                    "temperature": temperature
+                }
             )
 
-            # Preferred path: Gemini returns JSON text.
-            if getattr(response, "text", None):
-                try:
-                    return response_schema.model_validate_json(response.text)
-                except Exception as error:
-                    raise RuntimeError(
-                        "Gemini returned JSON, but it did not match the "
-                        f"expected schema: {error}"
-                    ) from error
-
-            # Compatibility fallback for SDK versions exposing parsed output.
-            if getattr(response, "parsed", None) is not None:
-                return response.parsed
-
-            raise RuntimeError(
-                f"Gemini returned an empty response from {model_name}."
-            )
-
-        except Exception as error:
-            last_error = error
-
-            if not _is_retryable_error(error):
-                raise
-
-            # Exponential backoff: 2s, then 4s.
-            if attempt < MAX_RETRIES_PER_MODEL - 1:
-                wait_seconds = 2 ** (attempt + 1)
-                print(
-                    f"[Gemini] {model_name} temporary error. "
-                    f"Retrying in {wait_seconds}s..."
+            if not getattr(response, "text", None):
+                raise RuntimeError(
+                    "Gemini returned an empty response"
                 )
-                time.sleep(wait_seconds)
 
-    raise last_error
+            return response.text
+
+        except Exception as exc:
+            last = exc
+
+            if (
+                attempt < 2
+                and any(
+                    x in str(exc).upper()
+                    for x in (
+                        "429",
+                        "503",
+                        "UNAVAILABLE",
+                        "TIMEOUT"
+                    )
+                )
+            ):
+                time.sleep(2 ** attempt)
+                continue
+
+            break
+
+    raise RuntimeError(f"LLM request failed: {last}")
+
+
+def generate_json(
+    prompt: str,
+    model: str | None = None
+):
+    raw = generate_text(
+        prompt + "\nReturn ONLY valid JSON.",
+        model=model
+    )
+
+    raw = raw.strip()
+
+    if raw.startswith("```json"):
+        raw = raw[7:]
+
+    if raw.startswith("```"):
+        raw = raw[3:]
+
+    if raw.endswith("```"):
+        raw = raw[:-3]
+
+    return json.loads(raw.strip())
 
 
 def generate_structured_response(
     prompt: str,
     response_schema,
+    model: str | None = None,
+    temperature: float = 0.2
 ):
     """
-    Generate a structured Pydantic response from Gemini.
-
-    Strategy:
-    1. Try Gemini 3.8 Flash.
-    2. Retry temporary errors with exponential backoff.
-    3. Fall back to Gemini 3.7 Flash.
-    4. Fall back to Gemini 3.6 Flash.
-    5. If every model fails, raise a clear error.
+    Generate a structured response using Gemini
+    and validate it using the provided Pydantic schema.
     """
-    errors = []
 
-    for model_name in MODELS:
+    client = _get_client()
+
+    if client is None:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured. "
+            "Configure it in backend/.env to enable LLM features."
+        )
+
+    model_name = model or os.getenv(
+        "GEMINI_MODEL",
+        "gemini-2.5-flash"
+    )
+
+    last = None
+
+    for attempt in range(3):
         try:
-            print(f"[Gemini] Trying model: {model_name}")
-
-            result = _generate_with_model(
-                model_name=model_name,
-                prompt=prompt,
-                response_schema=response_schema,
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "temperature": temperature,
+                    "response_mime_type": "application/json",
+                    "response_schema": response_schema,
+                },
             )
 
-            print(f"[Gemini] Success with model: {model_name}")
-            return result
+            if not getattr(response, "text", None):
+                raise RuntimeError(
+                    "Gemini returned an empty response"
+                )
 
-        except Exception as error:
-            errors.append(
-                f"{model_name}: {type(error).__name__}: {error}"
-            )
+            # Parse JSON returned by Gemini
+            data = json.loads(response.text)
 
-            print(
-                f"[Gemini] {model_name} failed: "
-                f"{type(error).__name__}: {error}"
-            )
+            # Validate against the project's Pydantic schema
+            return response_schema.model_validate(data)
 
-            # Continue to the next fallback model for temporary failures.
-            if not _is_retryable_error(error):
-                raise
+        except Exception as exc:
+            last = exc
+
+            if (
+                attempt < 2
+                and any(
+                    x in str(exc).upper()
+                    for x in (
+                        "429",
+                        "503",
+                        "UNAVAILABLE",
+                        "TIMEOUT"
+                    )
+                )
+            ):
+                time.sleep(2 ** attempt)
+                continue
+
+            break
 
     raise RuntimeError(
-        "Gemini AI service is temporarily unavailable. "
-        "All configured models failed after retries. "
-        "Please try again shortly.\n\n"
-        + "\n".join(errors)
+        f"Structured LLM request failed: {last}"
     )
