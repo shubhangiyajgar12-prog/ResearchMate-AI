@@ -291,6 +291,39 @@ def build_matrix(papers: list[LiteraturePaper]) -> dict:
     }
 
 
+@router.delete("/projects/{project_id}/papers/{paper_id}")
+def delete_project_paper(
+    project_id: int,
+    paper_id: int,
+    db: Session = Depends(get_db),
+):
+    """Remove one saved literature paper from the given project."""
+
+    paper = (
+        db.query(LiteraturePaper)
+        .filter(
+            LiteraturePaper.project_id == project_id,
+            LiteraturePaper.id == paper_id,
+        )
+        .first()
+    )
+
+    if paper is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Paper not found in this project.",
+        )
+
+    db.delete(paper)
+    db.commit()
+
+    return {
+        "message": "Paper removed from literature library.",
+        "paper_id": paper_id,
+        "project_id": project_id,
+    }
+
+
 @router.post("/literature-matrix")
 def create_literature_matrix(request: LiteratureMatrixRequest, db: Session = Depends(get_db)):
     ids = list(dict.fromkeys(request.paper_ids))

@@ -175,6 +175,11 @@ app.add_middleware(
         "http://127.0.0.1:5174",
     ],
 
+    # Vite may move to 5175/5176/... when another dev server is using
+    # the default port. Allow localhost development ports without
+    # opening cross-origin access to arbitrary external sites.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
+
     allow_credentials=True,
 
     allow_methods=["*"],

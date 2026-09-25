@@ -265,14 +265,31 @@ def run_citation_analysis(
         # ----------------------------------------------------
         response_findings = []
 
-        for finding in saved_findings:
+        raw_findings = result.get(
+            "findings",
+            [],
+        )
+
+        for index, finding in enumerate(saved_findings):
+            raw = (
+                raw_findings[index]
+                if index < len(raw_findings)
+                else {}
+            )
+
             response_findings.append(
                 CitationFinding(
                     id=finding.id,
                     section=finding.section,
                     claim_text=finding.claim_text,
+                    claim_type=raw.get(
+                        "claim_type"
+                    ),
                     citation_present=finding.citation_present,
                     citation_needed=finding.citation_needed,
+                    citation_status=raw.get(
+                        "citation_status"
+                    ),
                     confidence=finding.confidence,
                     suggested_source_id=(
                         finding.suggested_source_id
@@ -301,6 +318,36 @@ def run_citation_analysis(
                 "potential_missing_citations",
                 0,
             ),
+
+            citation_required_claims=result.get(
+                "citation_required_claims",
+                0,
+            ),
+
+            cited_required_claims=result.get(
+                "cited_required_claims",
+                0,
+            ),
+
+            own_research_claims=result.get(
+                "own_research_claims",
+                0,
+            ),
+
+            inherited_context_claims=result.get(
+                "inherited_context_claims",
+                0,
+            ),
+
+            ignored_artifacts=result.get(
+                "ignored_artifacts",
+                0,
+            ),
+
+            risk_level=result.get(
+                "risk_level"
+            ),
+
             findings=response_findings,
         )
 

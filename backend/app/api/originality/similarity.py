@@ -241,6 +241,11 @@ def analyze_originality(
                 "source_results",
                 [],
             ),
+
+            "duplicate_sources_excluded_count": result.get(
+                "duplicate_sources_excluded_count",
+                0,
+            ),
         }
 
         # ----------------------------------------------------
@@ -452,6 +457,52 @@ def analyze_originality(
             risk_level=(
                 report.risk_level
             ),
+
+            semantic_similarity_available=False,
+
+            lexical_similarity=(
+                result.get(
+                    "lexical_similarity",
+                    0.0,
+                )
+            ),
+
+            target_chunks=(
+                result.get(
+                    "target_chunks",
+                    0,
+                )
+            ),
+
+            sources_checked=(
+                result.get(
+                    "sources_checked",
+                    0,
+                )
+            ),
+
+            duplicate_sources_excluded_count=(
+                result.get(
+                    "duplicate_sources_excluded_count",
+                    0,
+                )
+            ),
+
+            limitations=[
+                (
+                    "Similarity is a textual evidence signal, "
+                    "not a plagiarism verdict."
+                ),
+                (
+                    "Only analyzed saved project papers with "
+                    "accessible extracted full text are compared."
+                ),
+                (
+                    "Semantic embedding similarity is not implemented "
+                    "in this build, so semantic_similarity is not an "
+                    "embedding score."
+                ),
+            ],
 
             matches=match_responses,
         )

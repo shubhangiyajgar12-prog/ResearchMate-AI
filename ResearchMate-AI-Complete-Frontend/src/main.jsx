@@ -42,7 +42,7 @@ import ReviewPage from "./ReviewPage";
 import PublicationAssistant from "./PublicationAssistant";
 import ConferencePage from "./ConferencePage";
 
-const API_BASE_URL = "http://127.0.0.1:8001";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
 
 /* -------------------------------------------------------
    API ERROR HELPERS
@@ -1395,13 +1395,22 @@ function PDFAnalysisSection() {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const response = await fetch(
-        `${API_BASE_URL}/literature/analyze-pdf`,
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 120000);
+
+      let response;
+      try {
+        response = await fetch(
+          `${API_BASE_URL}/literature/analyze-pdf`,
+          {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+          }
+        );
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
 
       const data = await parseApiResponse(response);
 
@@ -1413,11 +1422,22 @@ function PDFAnalysisSection() {
 
       setAnalysis(data);
     } catch (err) {
-      console.error(err);
-      setError(
-        err.message ||
-          "Something went wrong while analyzing the PDF."
-      );
+      console.error("PDF analysis request failed:", err);
+
+      if (err?.name === "AbortError") {
+        setError(
+          "PDF analysis timed out after 2 minutes. Check that FastAPI is running on port 8001 and try again."
+        );
+      } else if (err instanceof TypeError && err.message === "Failed to fetch") {
+        setError(
+          `Cannot reach the ResearchMate backend at ${API_BASE_URL}. Make sure uvicorn is running on port 8001 and the browser page is opened from localhost/127.0.0.1.`
+        );
+      } else {
+        setError(
+          err.message ||
+            "Something went wrong while analyzing the PDF."
+        );
+      }
     } finally {
       setLoading(false);
     }

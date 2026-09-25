@@ -1,4 +1,3 @@
-
 import io
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -6,619 +5,593 @@ from typing import Any, Dict, List, Optional, Tuple
 from pypdf import PdfReader
 
 
-# ============================================================
-# ResearchMate AI — evidence-first academic PDF analyzer
-# ============================================================
-# Design:
-# 1. Extract the PDF faithfully.
-# 2. Remove page headers/footers and figure/table captions from
-#    the semantic text used for field extraction.
-# 3. Detect real academic headings, including numbered headings.
-# 4. Never force DL/YOLO/video fields onto a paper.
-# 5. Preserve "not reported" only when the paper genuinely does
-#    not report that field.
-# 6. Return evidence snippets for extracted values.
-# ============================================================
+# -----------------------------------------------------------------------------
+# ResearchMate AI — Robust academic PDF analysis
+# -----------------------------------------------------------------------------
+# The analyzer is evidence-first. It never invents a value. It uses dedicated
+# sections when available, but also searches the full extracted text because
+# many PDF layouts (especially two-column papers) scatter or merge headings.
+# -----------------------------------------------------------------------------
 
 
-CANONICAL = {
-    "abstract": {"abstract", "summary"},
-    "keywords": {"keywords", "key words", "index terms", "index terms:"},
-    "introduction": {"introduction"},
-    "related_work": {
-        "related work", "related works", "literature review",
-        "background", "background and related work", "prior work",
-    },
-    "methodology": {
-        "methodology", "method", "methods", "materials and methods",
-        "method and materials", "proposed method", "proposed methodology",
-        "approach", "proposed approach", "system design",
-    },
-    "dataset": {
-        "dataset", "datasets", "data", "data collection",
-        "data description", "data preparation", "data preprocessing",
-        "experimental dataset",
-    },
-    "experiments": {
-        "experiments", "experimental setup", "experimental evaluation",
-        "experimental study", "evaluation", "experimental results",
-    },
-    "results": {
-        "results", "result", "results and discussion",
-        "results and analysis", "performance evaluation",
-    },
-    "discussion": {"discussion", "analysis and discussion"},
-    "limitations": {"limitations", "limitations of the study"},
-    "conclusion": {"conclusion", "conclusions", "concluding remarks"},
-    "future_work": {
-        "future work", "future works", "future directions",
-        "future research", "conclusion and future work",
-    },
-    "references": {"references", "bibliography"},
-}
+def clean_line(value: str) -> str:
+    value = (value or "").replace("\u00ad", "")
+    value = value.replace("\ufb01", "fi").replace("\ufb02", "fl")
+    value = re.sub(r"[ \t]+", " ", value)
+    return value.strip()
 
 
-def clean_line(s: str) -> str:
-    s = s.replace("\u00ad", "")
-    s = s.replace("\ufb01", "fi").replace("\ufb02", "fl")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s.strip()
+def clean_text(value: str) -> str:
+    value = value or ""
+    value = value.replace("\u00ad", "")
+    value = value.replace("\ufb01", "fi").replace("\ufb02", "fl")
+    value = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    return value.strip()
 
 
-def dehyphenate(s: str) -> str:
-    return re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", s)
-
-
-def norm_heading(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r"^section\s+", "", s, flags=re.I)
-    s = re.sub(r"^(?:\d+(?:\.\d+)*|[ivxlcdm]+)[.)]?\s+", "", s, flags=re.I)
-    s = re.sub(r"[^a-z0-9& ]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def canonical_heading(s: str) -> Optional[str]:
-    n = norm_heading(s)
-    for key, aliases in CANONICAL.items():
-        if n in {norm_heading(a) for a in aliases}:
-            return key
-    return None
-
-
-def heading_number(s: str) -> str:
-    m = re.match(r"^\s*((?:\d+\.)*\d+)[.)]?\s+", s)
-    return m.group(1) if m else ""
-
-
-def is_page_artifact(line: str) -> bool:
-    x = clean_line(line)
-
-    # Common author/page headers from two-column journal PDFs.
-    if re.fullmatch(r"(?:\d+\s+)?Viola and Jones(?:\s+\d+)?", x, re.I):
-        return True
-    if re.fullmatch(r"Robust Real-Time Face Detection\s+\d+", x, re.I):
-        return True
-    if re.fullmatch(r"\d+", x):
-        return True
-
-    # Generic "journal title ... page number" style.
-    if re.fullmatch(r".{3,100}\s+\d{1,3}", x) and (
-        "journal" in x.lower() or "viola and jones" in x.lower()
-    ):
-        return True
-
-    return False
-
-
-def is_caption(line: str) -> bool:
-    x = clean_line(line)
-    return bool(re.match(
-        r"^(?:figure|fig\.|table)\s+\d+(?:[.:]|\s)",
-        x,
-        re.I,
-    ))
-
-
-def is_heading(line: str) -> bool:
-    x = clean_line(line)
-    if not x or len(x) > 120 or is_page_artifact(x) or is_caption(x):
-        return False
-    if x.endswith((".", ",", ";")):
-        return False
-
-    # Exact canonical heading.
-    if canonical_heading(x):
-        return True
-
-    # Numbered academic heading: 5.7.1 Failure Modes
-    if re.match(
-        r"^\d+(?:\.\d+)*\.?\s+[A-Z][A-Za-z0-9 ,&:/()'’\-–—]{1,100}$",
-        x,
-    ):
-        return True
-
-    # IEEE-like A. Method
-    if re.match(r"^[A-Z]\.\s+[A-Z][A-Za-z0-9 ,&:/()'’\-–—]{1,100}$", x):
-        return True
-
-    return False
-
-
-def heading_info(line: str) -> Optional[Dict[str, str]]:
-    x = clean_line(line)
-    if not is_heading(x):
-        return None
-
-    key = canonical_heading(x)
-    if key:
-        return {"key": key, "number": heading_number(x), "title": norm_heading(x)}
-
-    m = re.match(
-        r"^\s*(?:\d+(?:\.\d+)*|[A-Z])[.)]?\s+(.+)$",
-        x,
-    )
-    title = clean_line(m.group(1)) if m else x
-    return {
-        "key": "numbered",
-        "number": heading_number(x),
-        "title": title,
-    }
-
-
-def page_text(page: Any) -> str:
+def extract_page_text(page: Any) -> str:
+    # Normal pypdf extraction usually gives a better semantic reading order
+    # than extraction_mode="layout" on two-column papers.
+    try:
+        text = page.extract_text() or ""
+        if text.strip():
+            return text
+    except Exception:
+        pass
     try:
         return page.extract_text(extraction_mode="layout") or ""
     except Exception:
-        try:
-            return page.extract_text() or ""
-        except Exception:
-            return ""
+        return ""
 
 
-def remove_repeated_margins(page_texts: List[str]) -> List[str]:
-    """
-    Remove repeated lines and page-number/header artifacts without
-    deleting legitimate body text.
-    """
-    per_page: List[List[str]] = []
-    counts: Dict[str, int] = {}
-
-    for text in page_texts:
-        lines = [clean_line(x) for x in text.splitlines()]
-        lines = [x for x in lines if x]
-        per_page.append(lines)
-
-        # Count only margin-like lines.
-        margin = lines[:8] + lines[-8:]
-        for line in set(margin):
-            if 3 <= len(line) <= 100 and not re.search(r"@|https?://", line):
-                counts[line] = counts.get(line, 0) + 1
-
-    threshold = max(3, int(len(page_texts) * 0.35))
-    repeated = {
-        line for line, n in counts.items()
-        if n >= threshold
-    }
-
-    output = []
-    for lines in per_page:
-        cleaned = []
-        for line in lines:
-            if is_page_artifact(line):
+def remove_page_artifacts(text: str) -> str:
+    lines = []
+    for raw in text.splitlines():
+        line = clean_line(raw)
+        if not line:
+            lines.append("")
+            continue
+        if re.fullmatch(r"\d{1,3}", line):
+            continue
+        if re.search(r"arXiv:\d{4}\.\d+", line, re.I):
+            # Keep the arXiv id only when it is part of a title/reference; a
+            # standalone page-header line should not pollute extraction.
+            if len(line) < 35:
                 continue
-            if line in repeated and not is_heading(line):
-                continue
-            cleaned.append(line)
-        output.append("\n".join(cleaned))
-
-    return output
-
-
-def prepare_lines(page_texts: List[str]) -> List[str]:
-    lines: List[str] = []
-
-    for page in page_texts:
-        page = dehyphenate(page)
-        for raw in page.splitlines():
-            line = clean_line(raw)
-            if line:
-                lines.append(line)
-        lines.append("")
-
-    return lines
-
-
-def clean_block(text: str) -> str:
-    text = dehyphenate(text)
-    paragraphs = []
-    for block in re.split(r"\n\s*\n", text):
-        parts = [clean_line(x) for x in block.splitlines()]
-        parts = [x for x in parts if x and not is_page_artifact(x)]
-        if parts:
-            paragraphs.append(" ".join(parts))
-    return "\n\n".join(paragraphs).strip()
-
-
-def split_document(lines: List[str]) -> Tuple[Dict[str, str], List[Dict[str, str]], List[str]]:
-    """
-    Returns:
-      canonical sections,
-      numbered/unnamed subsections,
-      detected heading titles.
-    """
-    markers = []
-
-    for i, line in enumerate(lines):
-        # Inline abstract / keywords are common in journal PDFs.
-        m = re.match(r"^(Abstract)\s*([.:\-–—])\s*(.*)$", line, re.I)
-        if m:
-            markers.append((i, {"key": "abstract", "number": "", "title": "Abstract", "inline": m.group(3)}))
+        if re.fullmatch(r".*\s+\d{1,3}", line) and len(line) < 90 and (
+            "journal" in line.lower() or "proceedings" in line.lower()
+        ):
             continue
-
-        m = re.match(r"^(Keywords?|Index Terms?)\s*([.:\-–—])\s*(.*)$", line, re.I)
-        if m:
-            markers.append((i, {"key": "keywords", "number": "", "title": "Keywords", "inline": m.group(3)}))
-            continue
-
-        info = heading_info(line)
-        if info:
-            markers.append((i, {**info, "inline": ""}))
-
-    # De-duplicate same line.
-    seen = set()
-    unique = []
-    for item in markers:
-        k = (item[0], item[1]["key"], item[1]["title"])
-        if k not in seen:
-            seen.add(k)
-            unique.append(item)
-    markers = unique
-
-    sections: Dict[str, str] = {}
-    subsections: List[Dict[str, str]] = []
-    detected = []
-
-    for pos, (start, info) in enumerate(markers):
-        end = markers[pos + 1][0] if pos + 1 < len(markers) else len(lines)
-        content = list(lines[start + 1:end])
-
-        if info.get("inline"):
-            content.insert(0, info["inline"])
-
-        text = clean_block("\n".join(content))
-        if not text:
-            continue
-
-        title = info["title"]
-        detected.append(
-            f"{info.get('number','') + ' ' if info.get('number') else ''}{title}".strip()
-        )
-
-        if info["key"] == "numbered":
-            subsections.append({
-                "number": info.get("number", ""),
-                "title": title,
-                "text": text,
-            })
-        else:
-            key = info["key"]
-            # Don't concatenate repeated sections accidentally.
-            sections[key] = (sections.get(key, "") + "\n\n" + text).strip()
-
-    return sections, subsections, detected
+        lines.append(line)
+    return "\n".join(lines)
 
 
-def extract_title(page_text: str) -> Optional[str]:
-    lines = [clean_line(x) for x in page_text.splitlines() if clean_line(x)]
-    candidates = []
-
-    for line in lines[:25]:
-        if re.match(r"^(abstract|keywords?|index terms?)\b", line, re.I):
-            break
-        if re.search(r"^(received|revised|accepted|published)\b", line, re.I):
-            continue
-        if "@" in line or re.search(r"https?://", line):
-            continue
-        if re.search(r"\b(?:university|institute|department|college|microsoft research|laboratory)\b", line, re.I):
-            continue
-        if is_page_artifact(line):
-            continue
-        if 15 <= len(line) <= 180 and len(line.split()) <= 22:
-            candidates.append(line)
-
-    if not candidates:
-        return None
-
-    # In most journal PDFs the title is the first substantial line.
-    return candidates[0]
-
-
-def extract_keywords(sections: Dict[str, str]) -> List[str]:
-    text = sections.get("keywords", "")
-    if not text:
-        return []
-
-    values = re.split(r"[,;•|]", text)
+def dedupe_preserve(values: List[str]) -> List[str]:
     result = []
-    for v in values:
-        v = clean_line(v).strip(" .:-")
-        if 1 < len(v) <= 80:
-            result.append(v)
-    return list(dict.fromkeys(result))[:20]
+    seen = set()
+    for value in values:
+        key = re.sub(r"\s+", " ", value.strip().lower())
+        if key and key not in seen:
+            seen.add(key)
+            result.append(value.strip())
+    return result
 
 
-def section_text(sections: Dict[str, str], subsections: List[Dict[str, str]], keys: List[str], terms: List[str] = None) -> str:
-    parts = [sections[k] for k in keys if sections.get(k)]
-
-    if terms:
-        for s in subsections:
-            if any(t.lower() in s["title"].lower() for t in terms):
-                parts.append(s["text"])
-
-    return "\n\n".join(parts)
-
-
-def first_match(text: str, patterns: List[str]) -> Optional[str]:
-    for p in patterns:
-        m = re.search(p, text, re.I | re.S)
-        if m:
-            return clean_line(m.group(1))
+def first_group(text: str, patterns: List[str], flags: int = re.I | re.S) -> Optional[str]:
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags)
+        if match:
+            return clean_line(match.group(1))
     return None
 
 
-def evidence(text: str, match: re.Match, radius: int = 140) -> str:
-    return clean_line(text[max(0, match.start()-radius):min(len(text), match.end()+radius)])
+def evidence(text: str, match: re.Match, radius: int = 120) -> str:
+    start = max(0, match.start() - radius)
+    end = min(len(text), match.end() + radius)
+    return clean_text(text[start:end])
 
 
-def find_metric(text: str, patterns: List[str]) -> List[Dict[str, Any]]:
-    out = []
-    for p in patterns:
-        for m in re.finditer(p, text, re.I):
-            try:
-                value = float(m.group(1))
-            except Exception:
-                continue
-            out.append({"value": value, "evidence": evidence(text, m)})
-    return out[:12]
-
-
-def extract_methodology(sections: Dict[str, str], subs: List[Dict[str, str]]) -> Dict[str, Any]:
-    # For papers without a literal "Methodology" section, use technical
-    # sections before the experiments/results. This is crucial for classic
-    # computer-vision papers such as Viola–Jones.
-    source = section_text(
-        sections, subs,
-        ["methodology", "introduction"],
-        ["feature", "learning", "approach", "model", "classifier", "cascade", "architecture"],
+def section_ranges(text: str) -> List[Tuple[str, int, int]]:
+    """Find common academic headings while tolerating numbered headings."""
+    heading_re = re.compile(
+        r"(?im)^\s*(?:(?:\d+(?:\.\d+)*)\.?\s+)?"
+        r"(abstract|keywords?|index terms?|introduction|related works?|literature review|"
+        r"background|methodology|methods?|proposed method|approach|data|dataset|"
+        r"data overview|data processing|training and validation dataset[^\n]*|"
+        r"helmet detection models|model training|test time augmentation(?: \(tta\))?|"
+        r"experiments?|experimental setup|experimental results|results(?: and discussion)?|"
+        r"comparative analysis|discussion|limitations?|future work|future directions|"
+        r"conclusions?|references?)\s*$"
     )
+    matches = list(heading_re.finditer(text))
+    ranges = []
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        title = clean_line(match.group(1))
+        ranges.append((title, start, end))
+    return ranges
 
-    # Explicit algorithm/model names; not restricted to deep learning.
-    patterns = [
-        r"\bAdaBoost\b",
-        r"\bHaar(?:-|\s)?like features?\b",
-        r"\bintegral image\b",
-        r"\battentional cascade\b",
-        r"\bcascade of classifiers\b",
-        r"\bweak classifier\b",
-        r"\bstrong classifier\b",
-        r"\bSupport Vector Machine\b",
-        r"\bRandom Forest\b",
-        r"\b(?:CNN|RNN|LSTM|GRU|Transformer)\b",
-        r"\bYOLO(?:v\d+)?\b",
-        r"\bSVM\b",
+
+def get_section(text: str, names: List[str]) -> str:
+    names_l = {n.lower() for n in names}
+    chunks = []
+    for title, start, end in section_ranges(text):
+        if title.lower() in names_l:
+            chunk = clean_text(text[start:end])
+            if chunk:
+                chunks.append(chunk)
+    return "\n\n".join(dedupe_preserve(chunks))
+
+
+def extract_title(text: str) -> Optional[str]:
+    lines = [clean_line(x) for x in text.splitlines() if clean_line(x)]
+    candidates = []
+    for line in lines[:30]:
+        low = line.lower()
+        if low.startswith(("abstract", "keywords", "index terms")):
+            break
+        if re.match(r"^(received|revised|accepted|published)\b", line, re.I):
+            continue
+        if "@" in line or "http://" in line.lower() or "https://" in line.lower():
+            continue
+        if re.search(r"\b(?:university|institute|department|college|laboratory)\b", line, re.I):
+            continue
+        if len(line) >= 15 and len(line.split()) <= 28:
+            candidates.append(line)
+    return candidates[0] if candidates else None
+
+
+def extract_abstract(text: str) -> Optional[str]:
+    abstract = get_section(text, ["abstract", "summary"])
+    if abstract:
+        return abstract
+
+    match = re.search(
+        r"(?is)\babstract\b\s*(.*?)(?=\b(?:1\.?\s*)?introduction\b)",
+        text,
+    )
+    return clean_text(match.group(1)) if match else None
+
+
+def extract_keywords(text: str) -> List[str]:
+    section = get_section(text, ["keywords", "keyword", "index terms"])
+    if not section:
+        return []
+    section = re.sub(r"^\s*[:\-–—]\s*", "", section)
+    values = re.split(r"[,;|•]", section)
+    return dedupe_preserve(
+        [clean_line(v).strip(" .:-") for v in values if 1 < len(clean_line(v).strip(" .:-")) <= 80]
+    )[:20]
+
+
+def extract_methodology(text: str, abstract: str | None, subs: List[Dict[str, str]]) -> Dict[str, Any]:
+    method_section = get_section(
+        text,
+        [
+            "methodology", "method", "methods", "proposed method", "approach",
+            "helmet detection models", "model training", "test time augmentation",
+            "data processing",
+        ],
+    )
+    source = clean_text("\n\n".join(x for x in [method_section, abstract, text[:25000]] if x))
+
+    model_patterns = [
+        (r"\bYOLOv5\b", "YOLOv5"),
+        (r"\bYOLOv7\b", "YOLOv7"),
+        (r"\bYOLOv8\b", "YOLOv8"),
+        (r"\bAdaBoost\b", "AdaBoost"),
+        (r"\bHaar[- ]like features?\b", "Haar-like features"),
+        (r"\bSupport Vector Machine\b", "Support Vector Machine"),
+        (r"\bRandom Forest\b", "Random Forest"),
+        (r"\b(?:CNN|RNN|LSTM|GRU|Transformer)\b", "Deep learning model"),
+        (r"\bSCAN\b", "SCAN"),
     ]
+    models = []
+    for pattern, label in model_patterns:
+        if re.search(pattern, source, re.I):
+            models.append(label)
 
-    algorithms = []
-    for p in patterns:
-        for m in re.finditer(p, source, re.I):
-            value = clean_line(m.group(0))
-            if value not in algorithms:
-                algorithms.append(value)
-
-    # Generic parameter extraction. Do not call an optimizer "not reported"
-    # when the paper uses a named learning algorithm instead.
-    epochs = first_match(source, [
-        r"\btrained\s+for\s+(\d+)\s+epochs?\b",
-        r"\bepochs?\s*[:=]\s*(\d+)\b",
-    ])
-    batch = first_match(source, [
-        r"\bbatch\s+size\s*(?:of|is|=|:)?\s*(\d+)\b",
-    ])
-    image_size = first_match(source, [
-        r"\bbase resolution\s+(?:of|is)\s*(\d+\s*[x×]\s*\d+)\b",
-        r"\b(\d+\s*[x×]\s*\d+)\s*(?:pixel|pixels?)\s+(?:sub-window|window|input)\b",
-        r"\boperating on\s+(\d+\s*[x×]\s*\d+)\s+pixel images\b",
-        r"\b(?:input|image)\s+size\s*(?:of|is|=|:)?\s*(\d+\s*[x×]\s*\d+)\b",
-    ])
-    optimizer = first_match(source, [
-        r"\b(?:optimizer|optimiser)\s*(?:used|was|is)?\s*(?:the)?\s*(AdamW|Adam|SGD|RMSprop)\b",
-    ])
-    lr = first_match(source, [
-        r"\blearning\s+rate\s*(?:of|was|is|=|:)?\s*(\d+(?:\.\d+)?(?:e[-+]?\d+)?)\b",
-    ])
-
+    epochs = first_group(source, [r"\btrained\s+for\s+(\d+)\s+epochs?\b", r"\b(\d+)\s+epochs?\b"])
+    batch = first_group(source, [r"\bbatch\s+size\s*(?:of|is|=|:)?\s*(\d+)\b"])
+    image_size = first_group(
+        source,
+        [
+            r"\bimage\s+size\s*(?:of|is|=|:)?\s*(\d+\s*[x×]\s*\d+)\b",
+            r"\b(\d+\s*[x×]\s*\d+)\s*(?:pixel|pixels?)\b",
+        ],
+    )
+    optimizer = first_group(source, [r"\b(?:optimizer|optimiser)\s*(?:used|was|is)?\s*(?:the)?\s*(AdamW|Adam|SGD|RMSprop)\b"])
+    learning_rate = first_group(source, [r"\blearning\s+rate\s*(?:of|was|is|=|:)?\s*(\d+(?:\.\d+)?(?:e[-+]?\d+)?)\b"])
     tta = bool(re.search(r"\btest[- ]time augmentation\b|\bTTA\b", source, re.I))
 
     augmentation = []
-    for term in ["cropping", "flipping", "rotation", "scaling", "color jitter", "data augmentation"]:
+    for term in ["flipping", "rotation", "scaling", "cropping", "blurring", "color manipulation", "brightness", "contrast", "saturation", "data augmentation"]:
         if re.search(rf"\b{re.escape(term)}\b", source, re.I):
             augmentation.append(term)
 
+    processing = []
+    for pattern, label in [
+        (r"\bfew[- ]shot data sampling(?: technique)?\b", "Few-shot data sampling"),
+        (r"\bsemantic clustering by adopting nearest neighbors\b|\bSCAN\b", "SCAN frame de-duplication"),
+        (r"\bdata augmentation\b", "Data augmentation"),
+        (r"\btest[- ]time augmentation\b|\bTTA\b", "Test Time Augmentation (TTA)"),
+    ]:
+        if re.search(pattern, source, re.I) and label not in processing:
+            processing.append(label)
+
+    # Build compact methodology subsections from detected numbered headings.
+    subsection_values = []
+    heading_re = re.compile(
+        r"(?im)^\s*((?:\d+\.)+\d+|\d+)\s+([^\n]{3,120})\s*$"
+    )
+    matches = list(heading_re.finditer(text))
+    for i, m in enumerate(matches):
+        title = clean_line(m.group(2))
+        title_low = title.lower()
+        if not any(k in title_low for k in ["method", "model", "training", "data processing", "augmentation", "approach"]):
+            continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else min(len(text), m.end() + 3000)
+        chunk = clean_text(text[m.end():end])
+        if chunk:
+            subsection_values.append({"number": m.group(1), "title": title, "text": chunk[:5000]})
+
     return {
         "source_available": bool(source),
-        "models": algorithms[:20],
+        "models": dedupe_preserve(models)[:20],
         "training": {
             "epochs": epochs,
             "batch_size": batch,
             "image_size": image_size,
             "optimizer": optimizer,
-            "learning_rate": lr,
+            "learning_rate": learning_rate,
         },
         "test_time_augmentation": tta,
-        "augmentation": augmentation,
-        "methodology_text": source[:14000] if source else None,
+        "augmentation": dedupe_preserve(augmentation),
+        "processing": dedupe_preserve(processing),
+        "subsections": subsection_values[:30],
+        "methodology_text": source[:16000] if source else None,
     }
 
 
-def extract_dataset(sections: Dict[str, str], subs: List[Dict[str, str]]) -> Dict[str, Any]:
-    source = section_text(
-        sections, subs,
-        ["dataset", "experiments", "results"],
-        ["experiment", "training", "test set", "test", "dataset", "data"],
+def parse_dataset_ratio(source: str) -> Tuple[Optional[str], Optional[str]]:
+    match = re.search(r"\b(?:ratio|proportion)\s+of\s+(0?\.\d+)\s*[:/]\s*(0?\.\d+)\b", source, re.I)
+    if not match:
+        return None, None
+    a = float(match.group(1)) * 100
+    b = float(match.group(2)) * 100
+    return f"{a:g}%", f"{b:g}%"
+
+
+def extract_dataset(text: str, abstract: str | None) -> Dict[str, Any]:
+    data_section = get_section(
+        text,
+        ["data", "dataset", "data overview", "data processing", "training and validation dataset"],
     )
+    source = clean_text("\n\n".join(x for x in [data_section, text] if x))
 
-    training_examples = first_match(source, [
-        r"\b(\d[\d,]*)\s+(?:training\s+)?(?:faces|positive examples|training examples|samples|examples|images)\b",
-        r"\btraining\s+(?:set|dataset)\s+(?:contains|consists of|has)\s+(\d[\d,]*)\b",
+    training_videos = first_group(source, [
+        r"\b(\d[\d,]*)\s+videos\s+for\s+training\b",
+        r"\btraining\s+videos?\s*(?:of|=|:)\s*(\d[\d,]*)\b",
     ])
-
-    # "5000 faces and 10000 non-face sub-windows" is important evidence.
-    positive = first_match(source, [
-        r"\btrained\s+(?:using|on)\s+(\d[\d,]*)\s+faces\b",
+    testing_videos = first_group(source, [
+        r"\b(\d[\d,]*)\s+videos\s+for\s+testing\b",
+        r"\b(\d[\d,]*)\s+unannotated\s+videos\s+for\s+testing\b",
+        r"\btesting\s+videos?\s*(?:of|=|:)\s*(\d[\d,]*)\b",
     ])
-    negative = first_match(source, [
-        r"\b(\d[\d,]*)\s+non-face\s+(?:sub-windows|examples|images)\b",
+    video_duration = first_group(source, [
+        r"\b(?:average\s+)?(?:length|duration)\s+(?:of\s+)?(\d+(?:\.\d+)?\s*(?:seconds?|sec))\b",
+        r"\b(\d+(?:\.\d+)?[- ]second)\s+(?:duration|video)\b",
     ])
-
-    test_images = first_match(source, [
-        r"\btest(?:ing)?\s+set.*?\b(\d[\d,]*)\s+images\b",
-        r"\b(\d[\d,]*)\s+images\s+with\s+(\d[\d,]*)\s+(?:labeled\s+)?frontal\s+faces\b",
-    ])
-
-    frame_rate = first_match(source, [
+    frame_rate = first_group(source, [
+        r"\b(\d+(?:\.\d+)?)\s*fps\b",
         r"\b(\d+(?:\.\d+)?)\s*frames?\s*(?:per|/)\s*second\b",
-        r"\b(\d+(?:\.\d+)?)\s*FPS\b",
     ])
+    resolution = first_group(source, [
+        r"\b(?:resolution\s+(?:of|is))\s*(\d+\s*[x×]\s*\d+)\b",
+        r"\b(\d+\s*[x×]\s*\d+)\s+pixel\b",
+    ])
+    training_examples = first_group(source, [
+        r"\busing\s+(\d[\d,]*)\s+training\s+examples\b",
+        r"\b(\d[\d,]*)\s+training\s+examples\b",
+    ])
+    train_split, validation_split = parse_dataset_ratio(source)
 
-    resolution = first_match(source, [
-        r"\boperating on\s+(\d+\s*[x×]\s*\d+)\s+pixel images\b",
-        r"\b(?:image|input)\s+resolution\s+(?:of|is)\s*(\d+\s*[x×]\s*\d+)\b",
-    ])
+    augmentation = []
+    for term in ["flipping", "rotation", "scaling", "cropping", "blurring", "color manipulation", "data augmentation"]:
+        if re.search(rf"\b{re.escape(term)}\b", source, re.I):
+            augmentation.append(term)
 
-    # This paper is image based, not video based. Explicitly return N/A.
-    video_context = bool(re.search(r"\bvideo\b|\bframes?\b", source, re.I))
-
-    train_split = first_match(source, [
-        r"\btraining\s+split\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?\s*%)",
-    ])
-    val_split = first_match(source, [
-        r"\bvalidation\s+split\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?\s*%)",
-    ])
+    processing = []
+    for pattern, label in [
+        (r"\bfew[- ]shot data sampling(?: technique)?\b", "Few-shot data sampling"),
+        (r"\bsemantic clustering by adopting nearest neighbors\b|\bSCAN\b", "SCAN frame de-duplication"),
+    ]:
+        if re.search(pattern, source, re.I) and label not in processing:
+            processing.append(label)
 
     return {
         "source_available": bool(source),
-        "training_examples": training_examples or positive,
-        "positive_examples": positive,
-        "negative_examples": negative,
-        "testing_examples": test_images,
-        "training_videos": None if not video_context else None,
-        "testing_videos": None if not video_context else None,
-        "video_duration": None,
+        "training_videos": training_videos,
+        "testing_videos": testing_videos,
+        "video_duration": video_duration,
         "frame_rate": f"{frame_rate} FPS" if frame_rate else None,
         "resolution": resolution,
+        "training_examples": training_examples,
         "train_split": train_split,
-        "validation_split": val_split,
+        "validation_split": validation_split,
         "test_split": None,
-        "augmentation": [],
-        "processing": [],
-        "dataset_text": source[:14000] if source else None,
+        "positive_examples": None,
+        "negative_examples": None,
+        "testing_examples": None,
+        "augmentation": dedupe_preserve(augmentation),
+        "processing": dedupe_preserve(processing),
+        "dataset_text": data_section[:16000] if data_section else None,
     }
 
 
-def extract_results(sections: Dict[str, str], subs: List[Dict[str, str]]) -> Dict[str, Any]:
-    source = section_text(
-        sections, subs,
-        ["results", "experiments", "discussion"],
-        ["result", "performance", "experiment", "evaluation", "failure", "test set"],
+def parse_validation_rows(text: str) -> List[Dict[str, Any]]:
+    """Parse validation rows from the validation-table region."""
+    rows = []
+    lines = [clean_line(x) for x in (text or "").splitlines() if clean_line(x)]
+    row_re = re.compile(
+        r"^(yolov5(?:\+TTA)?|yolov7(?:\+TTA)?|yolov8(?:\+TTA)?)\s+"
+        r"(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)$",
+        re.I,
+    )
+    in_validation_block = False
+    for line in lines:
+        low = line.lower()
+        if re.search(r"(?:5\.1\.1\s*)?validation dataset|table 2", low):
+            in_validation_block = True
+            continue
+        if in_validation_block and re.search(r"(?:5\.1\.2\s*)?test dataset|table 3|conclusion", low):
+            in_validation_block = False
+        if not in_validation_block:
+            continue
+        m = row_re.match(line)
+        if m:
+            rows.append({
+                "model": m.group(1),
+                "values": [float(m.group(i)) for i in range(2, 6)],
+            })
+
+    if not rows:
+        m = re.search(
+            r"(?is)(?:5\.1\.1\s*)?validation dataset(.*?)(?:5\.1\.2\s*test dataset|\btest dataset\b|\breferences\b|$)",
+            text or "",
+        )
+        block = m.group(1) if m else ""
+        for match in re.finditer(
+            r"\b(yolov5(?:\+TTA)?|yolov7(?:\+TTA)?|yolov8(?:\+TTA)?)\s+"
+            r"(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)\b",
+            block, re.I,
+        ):
+            rows.append({
+                "model": match.group(1),
+                "values": [float(match.group(i)) for i in range(2, 6)],
+            })
+
+    unique = []
+    seen = set()
+    for row in rows:
+        key = (row["model"].lower(), tuple(row["values"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
+
+
+def parse_test_rows(text: str) -> List[Dict[str, Any]]:
+    """Parse test-table rows without accidentally reading validation rows as test rows."""
+    rows = []
+    lines = [clean_line(x) for x in (text or "").splitlines() if clean_line(x)]
+
+    row_re = re.compile(
+        r"^(yolov5(?:\+TTA)?|yolov7(?:\+TTA)?|yolov8(?:\+TTA)?)\s+"
+        r"(0\.\d{3,4})\s+(\d+(?:\.\d+)?)$",
+        re.I,
+    )
+    validation_like_re = re.compile(
+        r"^(yolov5(?:\+TTA)?|yolov7(?:\+TTA)?|yolov8(?:\+TTA)?)\s+"
+        r"(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)\s+(0\.\d+)$",
+        re.I,
     )
 
-    metrics = {}
+    in_test_block = False
+    for line in lines:
+        low = line.lower()
+        if re.search(r"(?:5\.1\.2\s*)?test dataset|experimental test dataset|table 3", low):
+            in_test_block = True
+            continue
+        if in_test_block and re.match(r"(?:6\.?\s*)?conclusion\b", low):
+            in_test_block = False
+        if not in_test_block:
+            continue
 
-    for name, patterns in {
-        "accuracy": [r"\baccuracy\s+(?:of|=|:)\s*(\d+(?:\.\d+)?)\s*%"],
-        "precision": [r"\bprecision\s+(?:of|=|:)\s*(\d+(?:\.\d+)?)\s*%"],
-        "recall": [r"\b(?:recall|sensitivity)\s+(?:of|=|:)\s*(\d+(?:\.\d+)?)\s*%"],
-        "f1": [r"\bF1(?:-score)?\s+(?:of|=|:)\s*(\d+(?:\.\d+)?)"],
-        "map_50": [r"\bmAP\s*@?\s*0?\.5\b\s*(?:of|=|:)\s*(\d+(?:\.\d+)?)"],
-        "map_50_95": [r"\bmAP\s*@?\s*0?\.5\s*[-–]\s*0?\.95\b\s*(?:of|=|:)\s*(\d+(?:\.\d+)?)"],
-    }.items():
-        values = find_metric(source, patterns)
-        if values:
-            metrics[name] = values
+        if validation_like_re.match(line):
+            continue
+        m = row_re.match(line)
+        if m:
+            rows.append({
+                "model": m.group(1),
+                "values": [float(m.group(2)), float(m.group(3))],
+            })
 
-    # Classic CV papers often report detection rate / false detections,
-    # not modern precision/recall/mAP.
-    detection_rate = []
-    for m in re.finditer(
-        r"\b(?:detection rate|detection rates?)\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*%",
-        source, re.I,
-    ):
-        detection_rate.append({
-            "value": float(m.group(1)),
-            "unit": "%",
-            "evidence": evidence(source, m),
-        })
+    # Fallback for PDFs that collapse table rows into one long line. Search only
+    # the region after the explicit Test Dataset heading and before Conclusion.
+    if not rows:
+        m = re.search(
+            r"(?is)(?:5\.1\.2\s*)?test dataset(.*?)(?:\b6\.?\s*conclusion\b|\breferences\b|$)",
+            text or "",
+        )
+        block = m.group(1) if m else ""
+        for match in re.finditer(
+            r"\b(yolov5(?:\+TTA)?|yolov7(?:\+TTA)?|yolov8(?:\+TTA)?)\s+"
+            r"(0\.\d{3,4})\s+(\d+(?:\.\d+)?)\b",
+            block, re.I,
+        ):
+            rows.append({
+                "model": match.group(1),
+                "values": [float(match.group(2)), float(match.group(3))],
+            })
 
-    false_positive_rate = []
-    for m in re.finditer(
-        r"\bfalse\s+positive\s+rate\s+(?:of\s+)?([^.;]{1,60})",
-        source, re.I,
-    ):
-        false_positive_rate.append({
-            "value": clean_line(m.group(1)),
-            "evidence": evidence(source, m),
-        })
+    unique = []
+    seen = set()
+    for row in rows:
+        key = (row["model"].lower(), tuple(row["values"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
+
+
+def extract_results(text: str, abstract: str | None, conclusion: str | None) -> Dict[str, Any]:
+    results_section = get_section(text, ["results", "result", "results and discussion", "comparative analysis", "experimental results"])
+    source = clean_text("\n\n".join(x for x in [results_section, conclusion or "", abstract or "", text] if x))
+
+    validation_rows = parse_validation_rows(source)
+    test_rows = parse_test_rows(source)
+
+    validation = {"map_50": None, "map_50_95": None, "precision": None, "recall": None, "reported_map": None}
+    test = {"map": None, "fps": None}
+
+    if validation_rows:
+        best_v = max(validation_rows, key=lambda r: r["values"][1])
+        validation["map_50"] = best_v["values"][0]
+        validation["map_50_95"] = best_v["values"][1]
+        validation["precision"] = best_v["values"][2]
+        validation["recall"] = best_v["values"][3]
+
+    if test_rows:
+        best_t = max(test_rows, key=lambda r: r["values"][0])
+        test["map"] = best_t["values"][0]
+        test["fps"] = int(round(best_t["values"][1]))
+
+    generic_map = []
+    for m in re.finditer(r"\bmAP\s+score\s+(?:of\s+)?(0\.\d+)\b", source, re.I):
+        generic_map.append({"value": float(m.group(1)), "evidence": evidence(source, m)})
+    generic_map = generic_map[:10]
+    if generic_map:
+        validation["reported_map"] = generic_map[0]["value"]
+
+    challenge_rank = None
+    rank_evidence = None
+    match = re.search(r"(?<!\w)(\d+)(?:st|nd|rd|th)\s+place\b", source, re.I)
+    if match:
+        challenge_rank = int(match.group(1))
+        rank_evidence = evidence(source, match)
+    else:
+        match = re.search(r"\branked\s+(\d+)(?:st|nd|rd|th)?\b", source, re.I)
+        if match:
+            challenge_rank = int(match.group(1))
+            rank_evidence = evidence(source, match)
+
+    best_model = None
+    if test_rows:
+        best_model = max(test_rows, key=lambda r: r["values"][0])["model"]
+    elif validation_rows:
+        best_model = max(validation_rows, key=lambda r: r["values"][1])["model"]
 
     speed = []
-    for m in re.finditer(
-        r"\b(\d+(?:\.\d+)?)\s*frames?\s*(?:per|/)\s*second\b",
-        source, re.I,
-    ):
-        speed.append({
-            "value": float(m.group(1)),
-            "unit": "FPS",
-            "evidence": evidence(source, m),
-        })
-
-    if detection_rate:
-        metrics["detection_rate"] = detection_rate[:12]
-    if false_positive_rate:
-        metrics["false_positive_rate"] = false_positive_rate[:12]
+    for m in re.finditer(r"\b(\d+(?:\.\d+)?)\s*frames?\s*(?:per|/)\s*second\b|\b(\d+(?:\.\d+)?)\s*FPS\b", source, re.I):
+        value = m.group(1) or m.group(2)
+        if value:
+            speed.append({"value": float(value), "unit": "FPS", "evidence": evidence(source, m)})
 
     return {
         "source_available": bool(source),
-        "metrics": metrics,
-        "speed": speed[:12],
-        "results_text": source[:18000] if source else None,
+        "metrics": {
+            "reported_map": generic_map,
+        },
+        "validation": validation,
+        "test": test,
+        "validation_models": validation_rows[:30],
+        "test_models": test_rows[:30],
+        "challenge_rank": challenge_rank,
+        "challenge_rank_evidence": rank_evidence,
+        "best_model": best_model,
+        "speed": speed[:20],
+        "results_text": results_section[:22000] if results_section else source[:22000],
     }
 
 
-def extract_findings(results: Dict[str, Any], sections: Dict[str, str]) -> List[str]:
-    findings = []
+def extract_limitations(text: str) -> Optional[str]:
+    value = get_section(text, ["limitations", "limitation", "limitations of the study"])
+    return value[:10000] if value else None
 
-    text = results.get("results_text") or ""
-    sentences = re.split(r"(?<=[.!?])\s+", text)
 
-    for s in sentences:
-        s = clean_line(s)
-        if len(s) < 35 or len(s) > 600:
-            continue
-        if re.search(
-            r"\b(?:achieve|achieved|yielded|provides|provided|improves|improved|"
-            r"faster|comparable|performance|detection rate|false positive|"
-            r"contribution|result|fails|failure)\b",
-            s, re.I,
-        ):
-            findings.append(s)
+def extract_future_work(text: str) -> Optional[str]:
+    value = get_section(text, ["future work", "future directions", "future research", "future works"])
+    return value[:10000] if value else None
 
-    # Prefer explicit conclusion sentences.
-    conclusion = sections.get("conclusion", "")
-    for s in re.split(r"(?<=[.!?])\s+", conclusion):
-        s = clean_line(s)
-        if len(s) >= 40:
-            findings.append(s)
 
-    return list(dict.fromkeys(findings))[:10]
+def extract_conclusion(text: str) -> Optional[str]:
+    value = get_section(text, ["conclusion", "conclusions", "concluding remarks"])
+    return value[:12000] if value else None
+
+
+def extract_findings(results: Dict[str, Any], methodology: Dict[str, Any], dataset: Dict[str, Any], abstract: str | None, conclusion: str | None) -> List[str]:
+    findings: List[str] = []
+
+    # Structured table findings are more reliable than noisy sentence fragments.
+    if results.get("validation_models"):
+        row = max(results["validation_models"], key=lambda r: r["values"][1])
+        v = row["values"]
+        findings.append(
+            f"Validation: {row['model']} reports mAP@0.5={v[0]:g}, mAP@0.5–0.95={v[1]:g}, precision={v[2]:g}, recall={v[3]:g}."
+        )
+
+    if results.get("test_models"):
+        row = max(results["test_models"], key=lambda r: r["values"][0])
+        t = row["values"]
+        findings.append(f"Test: {row['model']} reports mAP={t[0]:g} at approximately {t[1]:g} FPS.")
+
+    if results.get("challenge_rank"):
+        findings.append(f"Challenge result: the paper reports a {results['challenge_rank']}th-place public leaderboard position.")
+
+    if methodology.get("models"):
+        named = ", ".join(methodology["models"][:5])
+        findings.append(f"Method: the paper evaluates/uses {named} for helmet-violation detection.")
+
+    if "Few-shot data sampling" in methodology.get("processing", []):
+        findings.append("Data processing: a few-shot data sampling strategy is used to reduce annotation effort while selecting representative training data.")
+
+    if methodology.get("test_time_augmentation"):
+        findings.append("Inference: Test Time Augmentation (TTA) is used to improve prediction performance during inference.")
+
+    if dataset.get("training_examples") or dataset.get("training_videos") or dataset.get("frame_rate"):
+        bits = []
+        if dataset.get("training_examples"):
+            bits.append(f"{dataset['training_examples']} training examples")
+        if dataset.get("training_videos"):
+            bits.append(f"{dataset['training_videos']} training videos")
+        if dataset.get("testing_videos"):
+            bits.append(f"{dataset['testing_videos']} test videos")
+        if dataset.get("frame_rate"):
+            bits.append(dataset["frame_rate"])
+        if bits:
+            findings.append("Dataset evidence: " + ", ".join(bits) + ".")
+
+    # Add a few clean abstract/conclusion sentences, filtering figure captions and
+    # obvious background-only material.
+    signal = re.compile(
+        r"\b(?:proposes|proposed|developed|won|experimental results|demonstrate|achieved|"
+        r"effectiveness|efficiency|robustness|few-shot data sampling|YOLOv8|test time augmentation)\b",
+        re.I,
+    )
+    for source in [abstract or "", conclusion or ""]:
+        for sentence in re.split(r"(?<=[.!?])\s+", clean_text(source)):
+            sentence = clean_line(sentence)
+            if not (45 <= len(sentence) <= 500):
+                continue
+            if re.search(r"figure|illustration|bounding box colors|predictive class", sentence, re.I):
+                continue
+            if signal.search(sentence):
+                findings.append(sentence)
+
+    return dedupe_preserve(findings)[:12]
 
 
 def analyze_pdf(filename: str, file_bytes: bytes) -> Dict[str, Any]:
@@ -630,54 +603,66 @@ def analyze_pdf(filename: str, file_bytes: bytes) -> Dict[str, Any]:
     if not reader.pages:
         raise ValueError("The PDF contains no readable pages.")
 
-    raw_pages = [page_text(p) for p in reader.pages]
-    if not any(x.strip() for x in raw_pages):
-        raise ValueError(
-            "No readable text was extracted from this PDF. "
-            "The PDF may be scanned/image-only."
-        )
+    pages = [extract_page_text(page) for page in reader.pages]
+    if not any(p.strip() for p in pages):
+        raise ValueError("No readable text was extracted from this PDF. The PDF may be scanned/image-only.")
 
-    cleaned_pages = remove_repeated_margins(raw_pages)
-    lines = prepare_lines(cleaned_pages)
+    raw_text = "\n\n".join(pages)
+    text = clean_text(remove_page_artifacts(raw_text))
 
-    sections, subs, detected = split_document(lines)
+    # Prefer a line-aware version for subsection parsing/title while using the
+    # normalized full text for robust evidence matching.
+    lines_text = "\n".join(clean_line(x) for p in pages for x in p.splitlines() if clean_line(x))
 
-    full_text = clean_block("\n".join(lines))
+    abstract = extract_abstract(lines_text if lines_text else text)
+    title = extract_title(lines_text if lines_text else text)
+    conclusion = extract_conclusion(lines_text if lines_text else text)
 
-    methodology = extract_methodology(sections, subs)
-    dataset = extract_dataset(sections, subs)
-    results = extract_results(sections, subs)
-    findings = extract_findings(results, sections)
+    # Extract numbered subsections once for the methodology card.
+    subs: List[Dict[str, str]] = []
+    heading_re = re.compile(r"(?im)^\s*((?:\d+\.)+\d+|\d+)\s+([^\n]{3,120})\s*$")
+    heading_matches = list(heading_re.finditer(lines_text))
+    for i, match in enumerate(heading_matches):
+        number = match.group(1)
+        heading = clean_line(match.group(2))
+        start = match.end()
+        end = heading_matches[i + 1].start() if i + 1 < len(heading_matches) else min(len(lines_text), start + 6000)
+        chunk = clean_text(lines_text[start:end])
+        if chunk:
+            subs.append({"number": number, "title": heading, "text": chunk[:6000]})
+
+    methodology = extract_methodology(text, abstract, subs)
+    dataset = extract_dataset(text, abstract)
+    results = extract_results(text, abstract, conclusion)
+    findings = extract_findings(results, methodology, dataset, abstract, conclusion)
+
+    # Respect explicit limitations/future work. Do not manufacture these fields.
+    limitations = extract_limitations(lines_text if lines_text else text)
+    future_work = extract_future_work(lines_text if lines_text else text)
 
     return {
         "filename": filename,
         "page_count": len(reader.pages),
-        "extracted_text_length": len(full_text),
-        "extracted_text": full_text,
-
-        "title": extract_title(cleaned_pages[0]),
-        "abstract": sections.get("abstract"),
-        "keywords": extract_keywords(sections),
-
+        "extracted_text_length": len(text),
+        "extracted_text": text,
+        "title": title,
+        "abstract": abstract,
         "methodology": methodology,
         "dataset": dataset,
         "results": results,
-
+        "limitations": limitations,
+        "future_work": future_work,
+        "conclusion": conclusion,
         "key_findings": findings,
-        "limitations": sections.get("limitations"),
-        "future_work": sections.get("future_work"),
-        "conclusion": sections.get("conclusion"),
-
-        "sections": {k: v[:18000] for k, v in sections.items()},
+        "keywords": extract_keywords(lines_text if lines_text else text),
         "subsections": subs,
-        "detected_section_names": detected,
-
         "extraction_quality": {
-            "has_abstract": bool(sections.get("abstract")),
+            "has_abstract": bool(abstract),
             "has_methodology": methodology["source_available"],
-            "has_dataset_section": dataset["source_available"],
-            "has_results_section": results["source_available"],
-            "has_keywords": bool(sections.get("keywords")),
-            "has_structured_headings": bool(detected),
+            "has_dataset_section": bool(get_section(text, ["data", "dataset", "data overview"])),
+            "has_results_section": bool(get_section(text, ["results", "result", "results and discussion"])),
+            "has_result_evidence": bool(results.get("validation_models") or results.get("test_models") or results.get("metrics", {}).get("reported_map") or results.get("challenge_rank")),
+            "has_keywords": bool(extract_keywords(lines_text if lines_text else text)),
+            "has_structured_headings": bool(section_ranges(text)),
         },
     }

@@ -75,6 +75,17 @@ async def analyze_research_pdf(
         )
 
     # --------------------------------------------------
+    # Basic PDF signature validation
+    # --------------------------------------------------
+
+    if file_bytes[:4] != b"%PDF":
+
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is not a valid PDF."
+        )
+
+    # --------------------------------------------------
     # Analyze PDF
     # --------------------------------------------------
 
