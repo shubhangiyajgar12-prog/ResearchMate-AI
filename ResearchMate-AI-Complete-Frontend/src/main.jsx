@@ -32,10 +32,12 @@ import {
   Activity,
   Menu,
   X,
+  AlertTriangle,
 } from "lucide-react";
 
 import "./index.css";
 import "./literature_clean_ui.css";
+import "./discovery_refinements.css";
 import OriginalityPage from "./OriginalityPage";
 import WritingPage from "./WritingPage";
 import ReviewPage from "./ReviewPage";
@@ -43,6 +45,58 @@ import PublicationAssistant from "./PublicationAssistant";
 import ConferencePage from "./ConferencePage";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+
+class DiscoveryErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, message: "" };
+  }
+
+  static getDerivedStateFromError(error) {
+    return {
+      hasError: true,
+      message: error?.message || "The Discovery result could not be rendered."
+    };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Discovery render error:", error, info);
+  }
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+
+    return (
+      <div className="discovery-error" role="alert">
+        <ShieldCheck size={17} />
+        <div>
+          <strong>Discovery result rendering failed.</strong>
+          <p>{this.state.message}</p>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => this.setState({ hasError: false, message: "" })}
+          >
+            Retry display
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+
+class ModuleErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state={hasError:false,message:""}; }
+  static getDerivedStateFromError(error){ return {hasError:true,message:error?.message||"This module could not be rendered."}; }
+  componentDidCatch(error,info){ console.error("Module render error:",error,info); }
+  render(){
+    if(!this.state.hasError) return this.props.children;
+    return <div className="discovery-error" role="alert"><AlertTriangle size={17}/><div><strong>Module rendering failed.</strong><p>{this.state.message}</p><button className="secondary-button" onClick={()=>this.setState({hasError:false,message:""})}>Retry display</button></div></div>;
+  }
+}
 
 /* -------------------------------------------------------
    API ERROR HELPERS
@@ -119,6 +173,206 @@ const normalizeAuthors = (authors) => {
   }
 
   return [];
+};
+
+const normalizeDiscoveryKeywords = (keywords) => {
+  if (!Array.isArray(keywords)) return [];
+
+  return keywords
+    .map((keyword) => {
+      if (typeof keyword === "string") {
+        return keyword.trim();
+      }
+
+      if (keyword && typeof keyword === "object") {
+        return (
+          keyword.keyword ||
+          keyword.phrase ||
+          keyword.label ||
+          keyword.name ||
+          ""
+        )
+          .toString()
+          .trim();
+      }
+
+      return "";
+    })
+    .filter(Boolean)
+    .filter((keyword, index, list) => {
+      const key = keyword.toLowerCase();
+      return list.findIndex((item) => item.toLowerCase() === key) === index;
+    });
+};
+
+const asString = (value, fallback = "") => {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return fallback;
+};
+
+const asStringArray = (value) => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (typeof item === "number" || typeof item === "boolean") {
+        return String(item);
+      }
+      if (item && typeof item === "object") {
+        return asString(
+          item.text ??
+            item.question ??
+            item.label ??
+            item.name ??
+            item.gap ??
+            item.keyword,
+          ""
+        ).trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+};
+
+const normalizeDiscoveryResults = (data) => {
+  const source = data && typeof data === "object" ? data : {};
+  const topic = source.topic && typeof source.topic === "object" ? source.topic : {};
+  const novelty = source.novelty && typeof source.novelty === "object" ? source.novelty : {};
+  const gap = source.gap && typeof source.gap === "object" ? source.gap : {};
+  const questions = source.questions && typeof source.questions === "object" ? source.questions : {};
+  const feasibility = source.feasibility && typeof source.feasibility === "object" ? source.feasibility : {};
+  const literature = source.literature && typeof source.literature === "object" ? source.literature : {};
+
+  const identifiedGaps = asStringArray(gap.identified_gaps);
+  const researchQuestions = asStringArray(questions.research_questions);
+  const variables = asStringArray(questions.variables);
+
+  const rawGapEvidence = Array.isArray(gap.evidence)
+    ? gap.evidence
+    : Array.isArray(gap.gap_evidence)
+      ? gap.gap_evidence
+      : [];
+
+  const normalizedGapEvidence = rawGapEvidence
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      ...item,
+      gap: asString(item.gap, "Candidate research direction"),
+      evidence_strength: asString(item.evidence_strength, "Evidence signal"),
+      supporting_paper_count: Number.isFinite(Number(item.supporting_paper_count))
+        ? Number(item.supporting_paper_count)
+        : Array.isArray(item.supporting_papers)
+          ? item.supporting_papers.length
+          : 0,
+      supporting_papers: Array.isArray(item.supporting_papers)
+        ? item.supporting_papers
+            .filter((paper) => paper && typeof paper === "object")
+            .map((paper) => ({
+              ...paper,
+              title: asString(paper.title, "Untitled paper"),
+              year: paper.year ?? "Year unavailable",
+            }))
+        : [],
+      evidence_snippets: Array.isArray(item.evidence_snippets)
+        ? item.evidence_snippets
+            .map((snippet) =>
+              typeof snippet === "string"
+                ? snippet
+                : asString(
+                    snippet?.sentence ?? snippet?.text ?? snippet?.snippet,
+                    ""
+                  )
+            )
+            .filter(Boolean)
+        : [],
+    }));
+
+  return {
+    ...source,
+    topic: {
+      ...topic,
+      validation_summary: asString(
+        topic.validation_summary,
+        "Research topic screening completed."
+      ),
+      research_field: asString(topic.research_field, "Research domain not established"),
+      specificity: asString(topic.specificity, "Needs Further Definition"),
+      missing_dimensions: asStringArray(topic.missing_dimensions),
+      keywords: normalizeDiscoveryKeywords(topic.keywords),
+      evidence_note: asString(topic.evidence_note, ""),
+      suggested_outcomes: Array.isArray(topic.suggested_outcomes)
+        ? topic.suggested_outcomes.filter((item) => item && typeof item === "object").map((item) => ({
+            name: asString(item.name, "Suggested outcome"),
+            description: asString(item.description, ""),
+            source: asString(item.source, "AI suggestion; not extracted from a paper"),
+          }))
+        : [],
+    },
+    novelty: {
+      ...novelty,
+      novelty_level: asString(novelty.novelty_level, "Not established"),
+      research_area: asString(novelty.research_area, "Research area not established"),
+      assessment: asString(novelty.assessment, "No novelty conclusion can be established from the retrieved evidence."),
+      recommendation: asString(novelty.recommendation, "Compare recent methods, datasets, evaluation settings, baselines and limitations."),
+    },
+    gap: {
+      ...gap,
+      identified_gaps: identifiedGaps,
+      research_direction: asString(
+        gap.research_direction,
+        "Define a specific intervention and measurable outcome, then validate the candidate direction against full-text literature."
+      ),
+      evidence: normalizedGapEvidence.map((item) => ({
+        ...item,
+        evidence_scope: asString(item.evidence_scope, "General literature"),
+        rural_specific_supporting_paper_count: Number.isFinite(Number(item.rural_specific_supporting_paper_count))
+          ? Number(item.rural_specific_supporting_paper_count)
+          : 0,
+      })),
+    },
+    questions: {
+      ...questions,
+      research_questions: researchQuestions,
+      hypothesis: asString(
+        questions.hypothesis,
+        "A testable hypothesis should be finalized after the research task, intervention and measurable outcome are defined."
+      ),
+      variables,
+    },
+    feasibility: {
+      ...feasibility,
+      feasibility_score: Number.isFinite(Number(feasibility.feasibility_score))
+        ? Number(feasibility.feasibility_score)
+        : 0,
+      overall_feasibility: asString(feasibility.overall_feasibility, "Needs Further Definition"),
+      dataset_feasibility: asString(feasibility.dataset_feasibility, "Not established"),
+      computational_feasibility: asString(feasibility.computational_feasibility, "Not established"),
+      implementation_complexity: asString(feasibility.implementation_complexity, "Not established"),
+      evaluation_feasibility: asString(feasibility.evaluation_feasibility, "Not established"),
+    },
+    literature: {
+      ...literature,
+      provider: asString(literature.provider, "OpenAlex"),
+      papers: Array.isArray(literature.papers) ? literature.papers : [],
+      retrieved_count: Number.isFinite(Number(literature.retrieved_count)) ? Number(literature.retrieved_count) : 0,
+      relevant_count: Number.isFinite(Number(literature.relevant_count)) ? Number(literature.relevant_count) : 0,
+      recent_count: Number.isFinite(Number(literature.recent_count)) ? Number(literature.recent_count) : 0,
+      search_status: asString(
+        literature.search_status,
+        literature.provider === "Unavailable" && Array.isArray(literature.provider_errors) && literature.provider_errors.length
+          ? "provider_error"
+          : "success"
+      ),
+      provider_errors: Array.isArray(literature.provider_errors) ? literature.provider_errors : [],
+      rural_specific_count: Number.isFinite(Number(literature.rural_specific_count)) ? Number(literature.rural_specific_count) : 0,
+      rural_specific_recent_count: Number.isFinite(Number(literature.rural_specific_recent_count)) ? Number(literature.rural_specific_recent_count) : 0,
+    },
+  };
 };
 
 const parseApiResponse = async (response) => {
@@ -891,16 +1145,21 @@ function Dashboard() {
 ------------------------------------------------------- */
 
 function Discovery() {
-  const [topic, setTopic] = useState(
-    "Explainable AI for Rural Healthcare Diagnosis"
-  );
+  const [topic, setTopic] = useState("Explainable AI for Rural Healthcare Diagnosis");
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState("");
 
   async function analyzeResearch() {
-    if (!topic.trim()) {
+    const cleanTopic = topic.trim();
+
+    if (!cleanTopic) {
       setError("Please enter a research topic.");
+      return;
+    }
+
+    if (cleanTopic.length < 3) {
+      setError("Please enter at least 3 characters for the research topic.");
       return;
     }
 
@@ -909,51 +1168,88 @@ function Discovery() {
     setResults(null);
 
     try {
-      const post = async (endpoint, body) => {
-        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      const response = await fetch(
+        `${API_BASE_URL}/discovery/analyze`,
+        {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            topic: cleanTopic,
+          }),
+        }
+      );
 
-        if (!response.ok) throw new Error(`${endpoint} failed`);
-        return response.json();
+      const data = await parseApiResponse(response);
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            data,
+            "Research Discovery analysis failed."
+          )
+        );
+      }
+
+      const normalized = normalizeDiscoveryResults(data);
+      normalized.literatureEvidence = {
+        provider: normalized.literature.provider,
+        papers: normalized.literature.papers.length
+          ? normalized.literature.papers
+          : Array.isArray(normalized.novelty.evidence_papers)
+            ? normalized.novelty.evidence_papers
+            : [],
+        retrieved_count: normalized.literature.retrieved_count || 0,
+        relevant_count:
+          normalized.literature.relevant_count ||
+          Number(normalized.novelty.evidence_count || 0),
+        recent_count:
+          normalized.literature.recent_count ||
+          Number(normalized.novelty.recent_evidence_count || 0),
+        search_status: normalized.literature.search_status,
+        provider_errors: normalized.literature.provider_errors,
+        rural_specific_count: normalized.literature.rural_specific_count,
+        rural_specific_recent_count: normalized.literature.rural_specific_recent_count,
       };
 
-      const cleanTopic = topic.trim();
-      const topicData = await post("/discovery/topic-validation", {
-        topic: cleanTopic,
-      });
-      const noveltyData = await post("/discovery/novelty-analysis", {
-        topic: cleanTopic,
-      });
-      const gapData = await post("/discovery/research-gap", {
-        topic: cleanTopic,
-      });
-      const questionsData = await post("/discovery/research-questions", {
-        topic: cleanTopic,
-        research_gaps: gapData.identified_gaps || [],
-      });
-      const feasibilityData = await post("/discovery/feasibility", {
-        topic: cleanTopic,
-      });
-
-      setResults({
-        topic: topicData,
-        novelty: noveltyData,
-        gap: gapData,
-        questions: questionsData,
-        feasibility: feasibilityData,
-      });
+      setResults(normalized);
     } catch (err) {
-      console.error(err);
+      console.error("Research Discovery error:", err);
+
       setError(
-        "Backend connection failed. Make sure FastAPI is running on port 8001."
+        err?.message ||
+          "Research Discovery failed. Make sure FastAPI is running on port 8001."
       );
     } finally {
       setLoading(false);
     }
   }
+
+
+  const literatureEvidence = results?.literatureEvidence || {};
+  const evidencePapers = Array.isArray(literatureEvidence.papers)
+    ? literatureEvidence.papers
+    : [];
+  const relevantCount = Number(literatureEvidence.relevant_count || 0);
+  const recentCount = Number(literatureEvidence.recent_count || 0);
+  const rawRetrievedCount = Number(
+    literatureEvidence.retrieved_count || 0
+  );
+  const searchStatus = literatureEvidence.search_status || "success";
+  const gapEvidence = Array.isArray(results?.gap?.evidence)
+    ? results.gap.evidence
+    : [];
+  const rawDiscoveryEvidenceNote =
+    results?.topic?.evidence_note ||
+    results?.evidence_note ||
+    "";
+
+  const summaryText = asString(results?.topic?.validation_summary, "");
+  const discoveryEvidenceNote =
+    rawDiscoveryEvidenceNote.trim().toLowerCase() === summaryText.trim().toLowerCase()
+      ? ""
+      : rawDiscoveryEvidenceNote;
 
   return (
     <div className="workspace-page discovery-page">
@@ -962,13 +1258,13 @@ function Discovery() {
           <div className="eyebrow">RESEARCH DISCOVERY</div>
           <h1>Discover a stronger research direction.</h1>
           <p>
-            Validate your idea, identify research gaps and transform
-            your topic into a researchable direction.
+            Validate your idea, compare it with real academic literature, and
+            turn it into a more researchable direction.
           </p>
         </div>
         <div className="discovery-status">
           <span className="status-dot" />
-          AI Discovery Engine
+          Evidence-first Discovery Engine
         </div>
       </div>
 
@@ -980,8 +1276,8 @@ function Discovery() {
           <div>
             <h2>Start with your research idea</h2>
             <p>
-              Analyze your topic across specificity, novelty, gaps,
-              questions and feasibility.
+              Analyze specificity, literature overlap, evidence-backed gaps,
+              research questions, and feasibility.
             </p>
           </div>
         </div>
@@ -1030,18 +1326,18 @@ function Discovery() {
           </div>
           <h2>Your research analysis starts here</h2>
           <p>
-            ResearchMate will evaluate specificity, novelty, research
-            gaps, research questions and feasibility.
+            ResearchMate will retrieve academic evidence and screen your idea
+            across specificity, prior-art overlap, gaps, questions, and feasibility.
           </p>
           <div className="analysis-pipeline">
-            {["Topic", "Novelty", "Research Gap", "Questions", "Feasibility"].map(
-              (item, index) => (
+            {["Topic", "Literature", "Novelty Signal", "Research Gap", "Questions", "Feasibility"].map(
+              (item, index, all) => (
                 <React.Fragment key={item}>
                   <span>
                     <CheckCircle2 size={14} />
                     {item}
                   </span>
-                  {index < 4 && <ChevronRight size={15} />}
+                  {index < all.length - 1 && <ChevronRight size={15} />}
                 </React.Fragment>
               )
             )}
@@ -1054,10 +1350,10 @@ function Discovery() {
           <div className="loading-orb">
             <Bot size={25} />
           </div>
-          <h3>ResearchMate is analyzing your topic...</h3>
+          <h3>ResearchMate is retrieving and analyzing literature...</h3>
           <p>
-            Checking topic structure, novelty, gaps, research questions
-            and feasibility.
+            Searching OpenAlex and building evidence for topic specificity,
+            prior-art overlap, and repeated limitation signals.
           </p>
           <div className="loading-bar">
             <div />
@@ -1075,14 +1371,12 @@ function Discovery() {
               </span>
               <h2>Research direction overview</h2>
               <p>{results.topic.validation_summary}</p>
-              <div className="plain-meaning">
-                <strong>In simple words:</strong>
-                <span>
-                  This is a preliminary AI screening. It does not prove
-                  that your topic is novel; the next step is evidence from
-                  real academic papers.
-                </span>
-              </div>
+              {discoveryEvidenceNote && (
+                <div className="plain-meaning discovery-evidence-note">
+                  <strong>Evidence boundary:</strong>
+                  <span>{discoveryEvidenceNote}</span>
+                </div>
+              )}
             </div>
             <div className="research-area-badge">
               {results.topic.research_field}
@@ -1093,12 +1387,31 @@ function Discovery() {
             <div className="discovery-stat-card">
               <span>SPECIFICITY</span>
               <strong>{results.topic.specificity}</strong>
-              <p>Topic definition quality</p>
+              <p>
+                {results.topic.missing_dimensions?.length
+                  ? `Missing: ${results.topic.missing_dimensions.join(", ")}`
+                  : "Core dimensions are defined"}
+              </p>
             </div>
-            <div className="discovery-stat-card">
-              <span>NOVELTY</span>
-              <strong>{results.novelty.novelty_score}%</strong>
-              <p>{results.novelty.novelty_level}</p>
+            <div className="discovery-stat-card prior-art-stat-card">
+              <span>PRIOR-ART SIGNAL</span>
+              <div className="prior-art-status-row">
+                <strong className="prior-art-status">
+                  {results.novelty.novelty_level}
+                </strong>
+                <span className="not-score-badge">Signal only</span>
+              </div>
+              <p>
+                {relevantCount} relevant papers · {recentCount} recent
+                {rawRetrievedCount > relevantCount
+                  ? ` · ${rawRetrievedCount} retrieved`
+                  : ""}
+              </p>
+              {searchStatus === "provider_error" && (
+                <small className="evidence-warning">
+                  Academic provider request failed. This result should not be used as a literature conclusion.
+                </small>
+              )}
             </div>
             <div className="discovery-stat-card">
               <span>FEASIBILITY</span>
@@ -1107,6 +1420,30 @@ function Discovery() {
             </div>
           </div>
 
+          {results.topic.missing_dimensions?.some((item) => item.toLowerCase() === "outcome") &&
+            results.topic.suggested_outcomes?.length > 0 && (
+              <div className="analysis-panel suggested-outcomes-panel" style={{ marginTop: "18px" }}>
+                <div className="analysis-panel-header">
+                  <div className="analysis-panel-icon amber"><Target size={19} /></div>
+                  <div>
+                    <span>MISSING OUTCOME</span>
+                    <h3>Candidate outcomes to define next</h3>
+                  </div>
+                </div>
+                <p className="panel-description">
+                  These are AI-generated candidates to help define the study. They are suggestions, not extracted facts or literature evidence.
+                </p>
+                <div className="suggested-outcomes-grid">
+                  {results.topic.suggested_outcomes.map((item) => (
+                    <div className="suggested-outcome-card" key={item.name}>
+                      <strong>{item.name}</strong>
+                      <p>{item.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
           <div className="analysis-two-column">
             <div className="analysis-panel">
               <div className="analysis-panel-header">
@@ -1114,30 +1451,33 @@ function Discovery() {
                   <Target size={19} />
                 </div>
                 <div>
-                  <span>NOVELTY ANALYSIS</span>
-                  <h3>What does the novelty result mean?</h3>
+                  <span>NOVELTY / PRIOR-ART ANALYSIS</span>
+                  <h3>What does the literature signal mean?</h3>
                 </div>
               </div>
 
-              <div className="novelty-score-row">
-                <div className="novelty-score">
-                  {results.novelty.novelty_score}
-                  <small>/100</small>
+              <div className="novelty-signal-block">
+                <div className="novelty-signal-pill">
+                  <Target size={17} />
+                  <span>{results.novelty.novelty_level}</span>
                 </div>
-                <div>
-                  <strong>{results.novelty.novelty_level}</strong>
+                <div className="novelty-signal-meta">
+                  <strong>Literature relevance signal</strong>
                   <p>{results.novelty.research_area}</p>
+                  <span>
+                    {relevantCount} relevant records · {recentCount} recent records
+                  </span>
                 </div>
               </div>
 
               <div className="analysis-text-box">
-                <span>POTENTIAL GAP</span>
-                <p>{results.novelty.potential_gap}</p>
+                <span>ASSESSMENT</span>
+                <p>{results.novelty.assessment}</p>
                 <div className="meaning-note">
-                  <strong>What you should do:</strong>
+                  <strong>Evidence required:</strong>
                   <span>
-                    Compare recent papers, methods, datasets and limitations
-                    before making a novelty claim.
+                    Compare recent methods, datasets, evaluation settings,
+                    baselines, and limitations before making a novelty claim.
                   </span>
                 </div>
               </div>
@@ -1170,7 +1510,7 @@ function Discovery() {
                 </div>
                 <div>
                   <strong>{results.feasibility.overall_feasibility}</strong>
-                  <p>Overall implementation screening</p>
+                  <p>Heuristic implementation screening</p>
                 </div>
               </div>
 
@@ -1181,21 +1521,15 @@ function Discovery() {
                 </div>
                 <div>
                   <span>Computation</span>
-                  <strong>
-                    {results.feasibility.computational_feasibility}
-                  </strong>
+                  <strong>{results.feasibility.computational_feasibility}</strong>
                 </div>
                 <div>
                   <span>Implementation</span>
-                  <strong>
-                    {results.feasibility.implementation_complexity}
-                  </strong>
+                  <strong>{results.feasibility.implementation_complexity}</strong>
                 </div>
                 <div>
                   <span>Evaluation</span>
-                  <strong>
-                    {results.feasibility.evaluation_feasibility}
-                  </strong>
+                  <strong>{results.feasibility.evaluation_feasibility}</strong>
                 </div>
               </div>
             </div>
@@ -1208,26 +1542,30 @@ function Discovery() {
               </div>
               <div>
                 <span>RESEARCH GAP</span>
-                <h3>Potential gaps to investigate</h3>
+                <h3>Evidence-backed candidate gaps</h3>
               </div>
             </div>
 
             <p className="panel-description">
-              These are preliminary possibilities generated from your topic.
-              They are not confirmed research gaps yet. RAG will later
-              validate them against actual papers and evidence.
+              A gap is shown only when repeated limitation signals occur across
+              multiple retrieved papers. A candidate gap is not proof of an
+              unsolved problem or novelty.
             </p>
 
             <div className="gap-list">
-              {results.gap.identified_gaps.map((gap, index) => (
-                <div className="gap-item" key={index}>
-                  <div className="gap-number">
-                    {String(index + 1).padStart(2, "0")}
+              {results.gap.identified_gaps?.length ? (
+                results.gap.identified_gaps.map((gap, index) => (
+                  <div className="gap-item" key={index}>
+                    <div className="gap-number">
+                      {String(index + 1).padStart(2, "0")}
+                    </div>
+                    <p>{gap}</p>
+                    <ArrowUpRight size={15} />
                   </div>
-                  <p>{gap}</p>
-                  <ArrowUpRight size={15} />
-                </div>
-              ))}
+                ))
+              ) : (
+                <div className="om-empty">No cross-paper gap established from the retrieved evidence.</div>
+              )}
             </div>
 
             <div className="research-direction-box">
@@ -1239,9 +1577,108 @@ function Discovery() {
                 <p>{results.gap.research_direction}</p>
               </div>
             </div>
+
+            {gapEvidence.length > 0 && (
+              <div style={{ marginTop: "18px" }}>
+                <div className="panel-description" style={{ marginBottom: "10px" }}>
+                  Why this candidate theme is shown
+                </div>
+                {gapEvidence.map((item, index) => (
+                  <div className="gap-evidence-card" key={item.theme || index}>
+                    <div className="gap-evidence-header">
+                      <div className="gap-evidence-badges">
+                        <span className="evidence-strength-badge">{item.evidence_strength}</span>
+                        <span className="evidence-scope-badge">Evidence scope: {item.evidence_scope}</span>
+                      </div>
+                      <span>{item.supporting_paper_count || item.supporting_papers?.length || 0} distinct papers</span>
+                    </div>
+                    <p className="gap-evidence-title">{item.theme_label || item.gap}</p>
+                    <p className="gap-evidence-note">{item.gap}</p>
+                    {item.evidence_scope !== "Rural-specific" && results.topic.topic.toLowerCase().includes("rural") && (
+                      <div className="evidence-boundary-inline">
+                        Rural-specific support: <strong>not established</strong>. This evidence theme comes from general literature and should be validated separately for the rural target context.
+                      </div>
+                    )}
+                    {item.supporting_papers?.length > 0 && (
+                      <div className="gap-supporting-papers">
+                        {item.supporting_papers.slice(0, 3).map((paper, paperIndex) => (
+                          <div className="gap-supporting-paper" key={`${paper.doi || paper.title || "paper"}-${paperIndex}`}>
+                            <strong>{paper.title}</strong>
+                            <span>{paper.year || "Year unavailable"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {item.evidence_snippets?.slice(0, 2).map((snippet, snippetIndex) => {
+                      const snippetText = typeof snippet === "string"
+                        ? snippet
+                        : asString(snippet?.sentence ?? snippet?.text ?? snippet?.snippet, "");
+                      if (!snippetText) return null;
+                      return <blockquote key={snippetIndex}>“{snippetText}”</blockquote>;
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+
           </div>
 
-          <div className="analysis-two-column">
+          <div className="analysis-panel" style={{ marginTop: "18px" }}>
+            <div className="analysis-panel-header">
+              <div className="analysis-panel-icon teal">
+                <BookOpen size={19} />
+              </div>
+              <div>
+                <span>ACADEMIC EVIDENCE</span>
+                <h3>Retrieved literature used for preliminary comparison</h3>
+              </div>
+            </div>
+
+            <p className="panel-description">
+              Provider: {results.literature.provider}. {relevantCount} relevant records were identified from {rawRetrievedCount} retrieved records; the top {Math.min(evidencePapers.length, 12)} are displayed. {recentCount} relevant records fall inside the recent-literature window.
+            </p>
+
+            {searchStatus === "provider_error" && (
+              <div className="evidence-warning-card">
+                <AlertTriangle size={17} />
+                <div>
+                  <strong>Academic retrieval warning</strong>
+                  <p>OpenAlex did not complete successfully for this query. Retry before interpreting the literature signal.</p>
+                </div>
+              </div>
+            )}
+
+            <div className="evidence-paper-list">
+              {evidencePapers.length ? evidencePapers.map((paper, index) => (
+                <article className="evidence-paper-card" key={paper.id || index}>
+                  <div className="evidence-paper-topline">
+                    <span className="evidence-paper-rank">#{index + 1}</span>
+                    <span>{paper.year || "Year unavailable"}</span>
+                  </div>
+
+                  <h4>{paper.title}</h4>
+
+                  <div className="evidence-paper-meta">
+                    <span>Relevance signal: <strong>{paper.relevance_signal ?? paper.overlap_signal ?? 0}%</strong></span>
+                    <span>Citations: <strong>{paper.cited_by_count ?? 0}</strong></span>
+                  </div>
+
+                  <div className="evidence-paper-links">
+                    {paper.doi && <span>DOI: {paper.doi}</span>}
+                    {paper.url && (
+                      <a href={paper.url} target="_blank" rel="noreferrer">
+                        Open academic record <ArrowUpRight size={13} />
+                      </a>
+                    )}
+                  </div>
+                </article>
+              )) : (
+                <div className="om-empty">No sufficiently relevant academic records were returned for this topic.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="analysis-two-column" style={{ marginTop: "18px" }}>
             <div className="analysis-panel">
               <div className="analysis-panel-header">
                 <div className="analysis-panel-icon teal">
@@ -1254,14 +1691,12 @@ function Discovery() {
               </div>
 
               <div className="question-list">
-                {results.questions.research_questions.map(
-                  (question, index) => (
-                    <div className="question-item" key={index}>
-                      <span>RQ{index + 1}</span>
-                      <p>{question}</p>
-                    </div>
-                  )
-                )}
+                {results.questions.research_questions.map((question, index) => (
+                  <div className="question-item" key={index}>
+                    <span>RQ{index + 1}</span>
+                    <p>{question}</p>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -1295,7 +1730,7 @@ function Discovery() {
             </div>
           </div>
 
-          <div className="analysis-panel keywords-panel">
+          <div className="analysis-panel keywords-panel" style={{ marginTop: "18px" }}>
             <div className="analysis-panel-header">
               <div className="analysis-panel-icon teal">
                 <Search size={19} />
@@ -1306,10 +1741,24 @@ function Discovery() {
               </div>
             </div>
 
-            <div className="research-keywords">
-              {results.topic.keywords.map((keyword, index) => (
-                <span key={index}>{keyword}</span>
-              ))}
+            <div
+              className="research-keywords discovery-research-keywords"
+              aria-label="Research keywords"
+            >
+              {normalizeDiscoveryKeywords(results.topic.keywords).map(
+                (keyword, index, allKeywords) => (
+                  <React.Fragment key={keyword.toLowerCase()}>
+                    <span className="research-keyword-pill">
+                      {keyword}
+                    </span>
+                    {index < allKeywords.length - 1 && (
+                      <span className="keyword-separator" aria-hidden="true">
+                        ·
+                      </span>
+                    )}
+                  </React.Fragment>
+                )
+              )}
             </div>
           </div>
 
@@ -1321,11 +1770,11 @@ function Discovery() {
               <span>HOW TO READ THIS ANALYSIS</span>
               <h3>Use this page to decide what to investigate next.</h3>
               <p>
-                Topic validation checks whether the idea is clearly defined.
-                Novelty is only a preliminary screening. Research gaps are
-                hypotheses that need evidence. Research questions define what
-                your study should answer, while feasibility checks whether the
-                study appears practical.
+                Topic validation checks definition quality. The prior-art signal
+                summarizes retrieved literature overlap and is not a novelty score.
+                Research gaps are evidence-backed candidate directions only when
+                repeated limitations appear across multiple papers. Feasibility is
+                a heuristic implementation screen.
               </p>
             </div>
           </div>
@@ -1337,12 +1786,11 @@ function Discovery() {
             <div>
               <span>AI RESEARCH MENTOR</span>
               <h3>
-                Next step: validate these findings against real
-                academic literature.
+                Next step: validate these findings against full-text literature.
               </h3>
               <p>
-                The next phase will connect academic search, document
-                retrieval, embeddings, RAG and agentic research analysis.
+                Continue to Literature to save papers, inspect PDFs, build the
+                literature matrix and perform cross-paper research-gap analysis.
               </p>
             </div>
             <button onClick={() => (window.location.href = "/literature")}>
@@ -1395,22 +1843,13 @@ function PDFAnalysisSection() {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 120000);
-
-      let response;
-      try {
-        response = await fetch(
-          `${API_BASE_URL}/literature/analyze-pdf`,
-          {
-            method: "POST",
-            body: formData,
-            signal: controller.signal,
-          }
-        );
-      } finally {
-        window.clearTimeout(timeoutId);
-      }
+      const response = await fetch(
+        `${API_BASE_URL}/literature/analyze-pdf`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
 
       const data = await parseApiResponse(response);
 
@@ -1422,22 +1861,11 @@ function PDFAnalysisSection() {
 
       setAnalysis(data);
     } catch (err) {
-      console.error("PDF analysis request failed:", err);
-
-      if (err?.name === "AbortError") {
-        setError(
-          "PDF analysis timed out after 2 minutes. Check that FastAPI is running on port 8001 and try again."
-        );
-      } else if (err instanceof TypeError && err.message === "Failed to fetch") {
-        setError(
-          `Cannot reach the ResearchMate backend at ${API_BASE_URL}. Make sure uvicorn is running on port 8001 and the browser page is opened from localhost/127.0.0.1.`
-        );
-      } else {
-        setError(
-          err.message ||
-            "Something went wrong while analyzing the PDF."
-        );
-      }
+      console.error(err);
+      setError(
+        err.message ||
+          "Something went wrong while analyzing the PDF."
+      );
     } finally {
       setLoading(false);
     }
@@ -3636,32 +4064,20 @@ function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
 
-            <Route path="/discovery" element={<Discovery />} />
+            <Route path="/discovery" element={<DiscoveryErrorBoundary><Discovery /></DiscoveryErrorBoundary>} />
 
             <Route
               path="/literature"
               element={<LiteraturePage />}
             />
 
-            <Route
-              path="/writing"
-              element={<WritingPage />}
-            />
+            <Route path="/writing" element={<ModuleErrorBoundary><WritingPage /></ModuleErrorBoundary>} />
 
-            <Route
-              path="/originality"
-              element={<OriginalityPage />}
-            />
+            <Route path="/originality" element={<ModuleErrorBoundary><OriginalityPage /></ModuleErrorBoundary>} />
 
-            <Route
-              path="/review"
-              element={<ReviewPage />}
-            />
+            <Route path="/review" element={<ModuleErrorBoundary><ReviewPage /></ModuleErrorBoundary>} />
 
-            <Route
-              path="/publication"
-              element={<PublicationAssistant />}
-            />
+            <Route path="/publication" element={<ModuleErrorBoundary><PublicationAssistant /></ModuleErrorBoundary>} />
             <Route path="/conferences" element={<ConferencePage />} />
           </Routes>
         </main>

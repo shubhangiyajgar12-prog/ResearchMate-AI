@@ -40,6 +40,10 @@ from app.services.discovery.research_gap import (
     analyze_research_gap
 )
 
+from app.services.discovery.evidence_analysis import (
+    analyze_topic_with_evidence
+)
+
 
 router = APIRouter(
     prefix="/discovery",
@@ -122,3 +126,22 @@ def feasibility_analysis(
     )
 
     return result
+
+# ==================================================
+# CONSOLIDATED EVIDENCE-FIRST ANALYSIS
+# ==================================================
+
+@router.post(
+    "/analyze"
+)
+def analyze_discovery(
+    request: TopicValidationRequest
+):
+    """
+    Run one evidence snapshot for the complete Discovery page.
+
+    Using one consolidated call keeps specificity, prior-art, gap,
+    questions, feasibility and literature evidence internally consistent.
+    """
+    return analyze_topic_with_evidence(request.topic)
+

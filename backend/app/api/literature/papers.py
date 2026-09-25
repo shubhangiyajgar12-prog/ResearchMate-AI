@@ -4,6 +4,10 @@ import html
 import re
 import httpx
 
+from app.database.database import SessionLocal
+from app.models.research_project import ResearchProject
+from app.models.literature_paper import LiteraturePaper
+
 from app.schemas.literature.paper import (
     PaperAuthor,
     PaperResult,
@@ -662,45 +666,148 @@ async def search_papers(
 # Saved project papers
 # ============================================================
 
-@router.get(
-    "/projects/{project_id}/papers"
-)
-def get_saved_project_papers(
-    project_id: int,
-):
-
-    from app.database.database import SessionLocal
-    from app.models.literature_paper import LiteraturePaper
-
+@router.get("/projects/{project_id}/papers")
+def get_saved_project_papers(project_id: int):
     db = SessionLocal()
-
     try:
-
+        project = db.query(ResearchProject).filter(ResearchProject.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Research project not found.")
         rows = (
             db.query(LiteraturePaper)
-            .filter(
-                LiteraturePaper.project_id
-                == project_id
-            )
-            .order_by(
-                LiteraturePaper.id.desc()
-            )
+            .filter(LiteraturePaper.project_id == project_id)
+            .order_by(LiteraturePaper.id.desc())
             .all()
         )
-
         return [
             {
                 "id": paper.id,
                 "project_id": paper.project_id,
+                "paper_id": paper.paper_id,
                 "title": paper.title,
                 "abstract": paper.abstract,
                 "year": paper.year,
                 "authors": paper.authors,
+                "citation_count": paper.citation_count,
                 "url": paper.url,
                 "doi": paper.doi,
             }
             for paper in rows
         ]
+    finally:
+        db.close()
 
+
+@router.post("/projects/{project_id}/papers")
+def save_project_paper(project_id: int, payload: dict):
+    db = SessionLocal()
+    try:
+        project = db.query(ResearchProject).filter(ResearchProject.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Research project not found.")
+
+        title = str(payload.get("title") or "").strip()
+        paper_id = str(payload.get("paper_id") or "").strip() or None
+        doi = _normalize_doi(payload.get("doi"))
+        if not title:
+            raise HTTPException(status_code=422, detail="Paper title is required.")
+
+        authors_value = payload.get("authors")
+        if isinstance(authors_value, list):
+            names = []
+            for author in authors_value:
+                name = str(author.get("name") or "").strip() if isinstance(author, dict) else str(author or "").strip()
+                if name:
+                    names.append(name)
+            authors_value = ", ".join(names) or None
+        elif authors_value is not None:
+            authors_value = str(authors_value).strip() or None
+
+        existing = None
+        if doi:
+            existing = db.query(LiteraturePaper).filter(
+                LiteraturePaper.project_id == project_id,
+                LiteraturePaper.doi == doi,
+            ).first()
+        if existing is None and paper_id:
+            existing = db.query(LiteraturePaper).filter(
+                LiteraturePaper.project_id == project_id,
+                LiteraturePaper.paper_id == paper_id,
+            ).first()
+        if existing is None:
+            normalized_title = _normalize_title(title)
+            for row in db.query(LiteraturePaper).filter(LiteraturePaper.project_id == project_id).all():
+                if _normalize_title(row.title) == normalized_title:
+                    existing = row
+                    break
+
+        if existing:
+            return {
+                "id": existing.id,
+                "project_id": existing.project_id,
+                "paper_id": existing.paper_id,
+                "title": existing.title,
+                "abstract": existing.abstract,
+                "year": existing.year,
+                "authors": existing.authors,
+                "citation_count": existing.citation_count,
+                "url": existing.url,
+                "doi": existing.doi,
+                "already_saved": True,
+            }
+
+        row = LiteraturePaper(
+            project_id=project_id,
+            paper_id=paper_id,
+            title=title,
+            abstract=str(payload.get("abstract") or "").strip() or None,
+            year=payload.get("year"),
+            authors=authors_value,
+            citation_count=payload.get("citation_count") or 0,
+            url=str(payload.get("url") or "").strip() or None,
+            doi=doi,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {
+            "id": row.id,
+            "project_id": row.project_id,
+            "paper_id": row.paper_id,
+            "title": row.title,
+            "abstract": row.abstract,
+            "year": row.year,
+            "authors": row.authors,
+            "citation_count": row.citation_count,
+            "url": row.url,
+            "doi": row.doi,
+            "already_saved": False,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Could not save paper to the research project: {exc}") from exc
+    finally:
+        db.close()
+
+
+@router.delete("/projects/{project_id}/papers/{paper_id}")
+def delete_project_paper(project_id: int, paper_id: int):
+    db = SessionLocal()
+    try:
+        row = db.query(LiteraturePaper).filter(
+            LiteraturePaper.id == paper_id,
+            LiteraturePaper.project_id == project_id,
+        ).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Paper not found in this research project.")
+        db.delete(row)
+        db.commit()
+        return {"success": True, "deleted_paper_id": paper_id}
+    except HTTPException:
+        db.rollback()
+        raise
     finally:
         db.close()

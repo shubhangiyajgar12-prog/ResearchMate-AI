@@ -1,59 +1,249 @@
-import os
-import json
-import time
-from typing import Dict, Any
+import re
+from typing import Any
 
-from google import genai
+from app.services.ai.llm_service import (
+    generate_json,
+    generate_text,
+)
 
 
 class WritingService:
 
-    def __init__(self):
+    # =========================================================
+    # SECTION DETECTION
+    # Deterministic — NOT AI generated
+    # =========================================================
 
-        # ---------------------------------------------------------
-        # Gemini API Key
-        # ---------------------------------------------------------
+    SECTION_ALIASES = {
+        "abstract": [
+            "abstract",
+        ],
+        "introduction": [
+            "introduction",
+            "1 introduction",
+        ],
+        "background_related_work": [
+            "background",
+            "related work",
+            "literature review",
+        ],
+        "methodology": [
+            "methodology",
+            "methods",
+            "method",
+            "materials and methods",
+        ],
+        "dataset_data_collection": [
+            "dataset",
+            "data collection",
+            "data acquisition",
+        ],
+        "proposed_method_system": [
+            "proposed method",
+            "proposed system",
+            "system architecture",
+            "proposed approach",
+        ],
+        "experimental_setup": [
+            "experimental setup",
+            "experiments",
+            "experimental methodology",
+        ],
+        "results": [
+            "results",
+            "experimental results",
+        ],
+        "discussion": [
+            "discussion",
+        ],
+        "limitations": [
+            "limitations",
+        ],
+        "conclusion": [
+            "conclusion",
+        ],
+        "future_work": [
+            "future work",
+            "future scope",
+        ],
+        "references": [
+            "references",
+            "bibliography",
+        ],
+    }
 
-        api_key = os.getenv("GEMINI_API_KEY")
+    # =========================================================
+    # BASIC HELPERS
+    # =========================================================
 
-        if not api_key:
-            raise RuntimeError(
-                "GEMINI_API_KEY is not configured in the environment."
-            )
+    @staticmethod
+    def _clean_list(
+        value: Any,
+    ) -> list[str]:
 
-        # ---------------------------------------------------------
-        # Gemini Client
-        # ---------------------------------------------------------
+        if not isinstance(value, list):
+            return []
 
-        self.client = genai.Client(
-            api_key=api_key
+        result = []
+
+        for item in value:
+
+            if isinstance(item, str):
+
+                text = item.strip()
+
+            elif isinstance(item, dict):
+
+                text = (
+                    item.get("text")
+                    or item.get("message")
+                    or item.get("reason")
+                    or item.get("title")
+                    or item.get("action")
+                    or ""
+                )
+
+                text = str(text).strip()
+
+            else:
+                text = ""
+
+            if text:
+                result.append(text)
+
+        return result
+
+    @staticmethod
+    def _clean_title_suggestions(
+        value: Any,
+    ) -> list[dict[str, str]]:
+
+        if not isinstance(value, list):
+            return []
+
+        result: list[dict[str, str]] = []
+
+        for item in value:
+
+            if isinstance(item, str):
+                title = item.strip()
+                reason = (
+                    "AI-generated title suggestion based on the supplied manuscript."
+                )
+
+            elif isinstance(item, dict):
+                title = str(
+                    item.get("title")
+                    or item.get("suggested_title")
+                    or item.get("text")
+                    or ""
+                ).strip()
+
+                reason = str(
+                    item.get("reason")
+                    or item.get("explanation")
+                    or item.get("rationale")
+                    or ""
+                ).strip()
+
+                if not reason:
+                    reason = (
+                        "AI-generated title suggestion based on the supplied manuscript."
+                    )
+
+            else:
+                continue
+
+            if title:
+                result.append(
+                    {
+                        "title": title,
+                        "reason": reason,
+                    }
+                )
+
+        return result
+
+    @staticmethod
+    def _extract_json(
+        text: str,
+    ) -> dict:
+
+        text = (
+            text or ""
+        ).strip()
+
+        if text.startswith("```json"):
+            text = text[7:]
+
+        elif text.startswith("```"):
+            text = text[3:]
+
+        if text.endswith("```"):
+            text = text[:-3]
+
+        text = text.strip()
+
+        import json
+
+        return json.loads(
+            text
         )
 
-        # ---------------------------------------------------------
-        # Gemini Model Fallback List
-        #
-        # If one model is unavailable / overloaded,
-        # the next model will automatically be tried.
-        # ---------------------------------------------------------
+    # =========================================================
+    # DETERMINISTIC SECTION DETECTION
+    # =========================================================
 
-        configured_model = os.getenv("GEMINI_MODEL")
+    def detect_sections(
+        self,
+        manuscript: str,
+    ) -> list[str]:
 
-        self.models = []
+        if not manuscript:
+            return []
 
-        if configured_model:
-            self.models.append(configured_model)
+        detected = []
 
-        fallback_models = [
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash-lite",
-        ]
+        lines = manuscript.splitlines()
 
-        for model in fallback_models:
+        for line in lines:
 
-            if model not in self.models:
-                self.models.append(model)
+            normalized = re.sub(
+                r"[^a-zA-Z0-9\s]",
+                " ",
+                line.lower(),
+            )
+
+            normalized = re.sub(
+                r"\s+",
+                " ",
+                normalized,
+            ).strip()
+
+            if not normalized:
+                continue
+
+            for section_name, aliases in (
+                self.SECTION_ALIASES.items()
+            ):
+
+                if section_name in detected:
+                    continue
+
+                for alias in aliases:
+
+                    if (
+                        normalized == alias
+                        or normalized.startswith(
+                            alias + " "
+                        )
+                    ):
+                        detected.append(
+                            section_name
+                        )
+                        break
+
+        return detected
 
     # =========================================================
     # ANALYZE PAPER
@@ -63,112 +253,81 @@ class WritingService:
         self,
         title: str,
         abstract: str,
-        manuscript: str
-    ) -> Dict[str, Any]:
+        manuscript: str,
+    ) -> dict:
 
-        # ---------------------------------------------------------
-        # Build Academic Writing Analysis Prompt
-        # ---------------------------------------------------------
+        detected = self.detect_sections(
+            manuscript
+        )
+
+        expected = list(
+            self.SECTION_ALIASES.keys()
+        )
+
+        missing = [
+            section
+            for section in expected
+            if section not in detected
+            and section not in (
+                "abstract",
+            )
+        ]
+
+        structure_score = round(
+            (
+                len(detected)
+                / max(
+                    len(expected),
+                    1,
+                )
+            )
+            * 10,
+            1,
+        )
 
         prompt = f"""
-You are an expert academic research writing mentor,
-research methodology expert, and scientific publication reviewer.
+You are an academic research writing assistant.
 
-Analyze the following research paper carefully.
+Analyze ONLY the supplied manuscript.
 
-Your job is NOT to rewrite the complete paper.
+Do not invent:
+- research results
+- datasets
+- metrics
+- citations
+- authors
+- papers
+- DOI values
+- experimental numbers
 
-Your job is to provide a detailed, structured and actionable
-academic writing analysis.
+If information is missing, say that it is missing.
 
-IMPORTANT RULES:
+Do not claim plagiarism.
 
-1. Do not invent references.
-2. Do not invent experimental results.
-3. Do not invent datasets.
-4. Do not invent numerical values.
-5. Do not claim that something is plagiarized.
-6. Identify similarity/citation concerns only as risks.
-7. Preserve the researcher's original meaning.
-8. Do not change technical facts without evidence.
-9. Focus on academic quality, clarity, structure,
-   technical writing and publication readiness.
-10. Give practical recommendations that a researcher
-    can directly apply.
-11. If information is missing from the manuscript,
-    explicitly identify it as missing.
-12. Do not assume that missing information exists.
-13. Do not create fake citations or fake papers.
-14. Use the actual manuscript as the only source
-    for paper-specific claims.
+Return JSON with exactly these top-level fields:
 
-Return ONLY valid JSON.
+paper_structure
+title_suggestions
+abstract_feedback
+academic_writing_feedback
+citation_reference_feedback
+formatting_feedback
+overall_recommendations
+strengths
+improvement_areas
 
-Required JSON structure:
+The deterministic section detection is:
 
-{{
-  "paper_structure": {{
-      "detected_sections": [],
-      "missing_sections": [],
-      "section_order_feedback": "",
-      "structure_score": 0
-  }},
+{detected}
 
-  "title_suggestions": [
-      {{
-          "title": "",
-          "reason": ""
-      }}
-  ],
+The deterministic structure score is:
 
-  "abstract_feedback": {{
-      "has_background": true,
-      "has_problem": true,
-      "has_method": true,
-      "has_results": true,
-      "has_conclusion": true,
-      "strengths": [],
-      "issues": [],
-      "suggested_improvements": []
-  }},
+{structure_score}
 
-  "academic_writing_feedback": {{
-      "clarity": 0,
-      "conciseness": 0,
-      "academic_tone": 0,
-      "grammar": 0,
-      "technical_precision": 0,
-      "coherence": 0,
-      "strengths": [],
-      "issues": [],
-      "examples_to_improve": []
-  }},
+The AI may explain the evidence, but must not replace
+these deterministic values.
 
-  "citation_reference_feedback": {{
-      "citation_style_observations": [],
-      "citation_risks": [],
-      "reference_consistency_issues": [],
-      "recommendations": []
-  }},
-
-  "formatting_feedback": {{
-      "heading_issues": [],
-      "paragraph_issues": [],
-      "figure_table_issues": [],
-      "equation_issues": [],
-      "general_formatting_issues": []
-  }},
-
-  "overall_recommendations": [],
-
-  "strengths": [],
-
-  "improvement_areas": []
-}}
-
-ACADEMIC PAPER:
-
-TITLE:
+MANUSCRIPT TITLE:
 {title}
 
 ABSTRACT:
@@ -178,230 +337,170 @@ MANUSCRIPT:
 {manuscript}
 """
 
-        # ---------------------------------------------------------
-        # Gemini Request With Automatic Model Fallback
-        # ---------------------------------------------------------
-
-        response = None
-        last_error = None
-
-        for model_name in self.models:
-
-            # Try each model a maximum of 2 times
-            for attempt in range(2):
-
-                try:
-
-                    print(
-                        f"[WritingService] "
-                        f"Trying model: {model_name} "
-                        f"(attempt {attempt + 1}/2)"
-                    )
-
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config={
-                            "temperature": 0.2,
-                            "response_mime_type": "application/json"
-                        }
-                    )
-
-                    print(
-                        f"[WritingService] "
-                        f"Success with model: {model_name}"
-                    )
-
-                    break
-
-                except Exception as e:
-
-                    last_error = e
-                    error_text = str(e)
-
-                    print(
-                        f"[WritingService] "
-                        f"Model failed: {model_name}"
-                    )
-
-                    print(
-                        f"[WritingService] "
-                        f"Error: {error_text[:500]}"
-                    )
-
-                    # -------------------------------------------------
-                    # Temporary availability / overload errors
-                    # Retry once before switching model.
-                    # -------------------------------------------------
-
-                    if (
-                        "503" in error_text
-                        or "UNAVAILABLE" in error_text
-                        or "429" in error_text
-                        or "RESOURCE_EXHAUSTED" in error_text
-                    ):
-
-                        if attempt == 0:
-
-                            print(
-                                "[WritingService] "
-                                "Temporary Gemini error. "
-                                "Retrying..."
-                            )
-
-                            time.sleep(2)
-                            continue
-
-                        print(
-                            "[WritingService] "
-                            f"Switching from {model_name} "
-                            "to next model."
-                        )
-
-                        break
-
-                    # -------------------------------------------------
-                    # Model not found / invalid model
-                    # Try next model.
-                    # -------------------------------------------------
-
-                    if (
-                        "404" in error_text
-                        or "NOT_FOUND" in error_text
-                    ):
-
-                        print(
-                            "[WritingService] "
-                            f"Model {model_name} unavailable. "
-                            "Trying next model."
-                        )
-
-                        break
-
-                    # -------------------------------------------------
-                    # Other errors
-                    # -------------------------------------------------
-
-                    raise
-
-            # If successful, stop model loop
-            if response is not None:
-                break
-
-        # ---------------------------------------------------------
-        # All models failed
-        # ---------------------------------------------------------
-
-        if response is None:
-
-            raise RuntimeError(
-                "Writing analysis failed because all Gemini models "
-                f"were unavailable. Last error: {last_error}"
-            )
-
-        # ---------------------------------------------------------
-        # Read Gemini Response
-        # ---------------------------------------------------------
-
-        raw = response.text
-
-        if not raw:
-            raise RuntimeError(
-                "Gemini returned an empty response."
-            )
-
-        raw = raw.strip()
-
-        # ---------------------------------------------------------
-        # Remove Markdown JSON Fences
-        # ---------------------------------------------------------
-
-        if raw.startswith("```json"):
-
-            raw = raw[len("```json"):].strip()
-
-        elif raw.startswith("```"):
-
-            raw = raw[len("```"):].strip()
-
-        if raw.endswith("```"):
-
-            raw = raw[:-3].strip()
-
-        # ---------------------------------------------------------
-        # Parse JSON
-        # ---------------------------------------------------------
-
         try:
 
-            result = json.loads(raw)
-
-        except json.JSONDecodeError as e:
-
-            print(
-                "[WritingService] "
-                "Gemini returned invalid JSON."
+            result = generate_json(
+                prompt
             )
 
-            print(
-                f"[WritingService] Raw response: {raw[:1000]}"
-            )
+        except Exception as exc:
 
             raise RuntimeError(
-                f"Gemini returned invalid JSON: {str(e)}"
+                "Writing AI analysis failed."
+            ) from exc
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            raise RuntimeError(
+                "Writing AI returned an invalid object."
             )
 
-        # ---------------------------------------------------------
-        # Ensure Expected Keys Exist
-        # ---------------------------------------------------------
+        result["paper_structure"] = {
+            "detected_sections": detected,
+            "missing_sections": missing,
+            "section_order_feedback": (
+                result.get(
+                    "paper_structure",
+                    {},
+                ).get(
+                    "section_order_feedback",
+                    "",
+                )
+            ),
+            "structure_score": structure_score,
+        }
 
-        result.setdefault(
-            "paper_structure",
-            {}
+        result["title_suggestions"] = (
+            self._clean_title_suggestions(
+                result.get(
+                    "title_suggestions",
+                    [],
+                )
+            )
         )
 
-        result.setdefault(
-            "title_suggestions",
-            []
+        result["overall_recommendations"] = (
+            self._clean_list(
+                result.get(
+                    "overall_recommendations",
+                    [],
+                )
+            )
         )
 
-        result.setdefault(
-            "abstract_feedback",
-            {}
+        result["strengths"] = (
+            self._clean_list(
+                result.get(
+                    "strengths",
+                    [],
+                )
+            )
         )
 
-        result.setdefault(
-            "academic_writing_feedback",
-            {}
+        result["improvement_areas"] = (
+            self._clean_list(
+                result.get(
+                    "improvement_areas",
+                    [],
+                )
+            )
         )
 
-        result.setdefault(
-            "citation_reference_feedback",
-            {}
+        return {
+            "paper_structure": result[
+                "paper_structure"
+            ],
+
+            "detected_sections": detected,
+
+            "title_suggestions": result[
+                "title_suggestions"
+            ],
+
+            "abstract_feedback": result.get(
+                "abstract_feedback",
+                {},
+            ),
+
+            "academic_writing_feedback": result.get(
+                "academic_writing_feedback",
+                {},
+            ),
+
+            "citation_reference_feedback": result.get(
+                "citation_reference_feedback",
+                {},
+            ),
+
+            "formatting_feedback": result.get(
+                "formatting_feedback",
+                {},
+            ),
+
+            "overall_recommendations": result[
+                "overall_recommendations"
+            ],
+
+            "strengths": result[
+                "strengths"
+            ],
+
+            "improvement_areas": result[
+                "improvement_areas"
+            ],
+        }
+
+    # =========================================================
+    # SECTION WRITING ASSISTANT
+    # =========================================================
+
+    def assist_section(
+        self,
+        section_name: str,
+        content: str,
+        instruction: str,
+        mode: str = "improve",
+    ) -> str:
+
+        section_name = (
+            section_name
+            or "unknown section"
         )
 
-        result.setdefault(
-            "formatting_feedback",
-            {}
-        )
+        prompt = f"""
+You are assisting with academic research writing.
 
-        result.setdefault(
-            "overall_recommendations",
-            []
-        )
+SECTION:
+{section_name}
 
-        result.setdefault(
-            "strengths",
-            []
-        )
+MODE:
+{mode}
 
-        result.setdefault(
-            "improvement_areas",
-            []
-        )
+USER INSTRUCTION:
+{instruction}
 
-        # ---------------------------------------------------------
-        # Return Final Structured Result
-        # ---------------------------------------------------------
+CURRENT TEXT:
+{content}
 
-        return result
+Rules:
+
+1. Preserve the author's meaning.
+2. Do not invent facts.
+3. Do not invent research results.
+4. Do not invent numerical values.
+5. Do not invent citations.
+6. Do not invent datasets.
+7. Do not invent references.
+8. Do not introduce claims that cannot be supported
+   by the supplied text.
+9. If a result/value is missing, keep an explicit
+   placeholder instead of inventing it.
+10. Return only the revised text.
+"""
+
+        return generate_text(
+            prompt,
+            temperature=0.15,
+        ).strip()

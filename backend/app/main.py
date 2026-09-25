@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+
 # ============================================================
 # API MODULES
 # ============================================================
@@ -36,14 +37,35 @@ from app.models.research_project import ResearchProject
 from app.models.literature_paper import LiteraturePaper
 from app.models.paper_analysis import PaperAnalysis
 
+# ------------------------------------------------------------
+# Research Writing
+# ------------------------------------------------------------
+
+from app.models.manuscript import (
+    Manuscript,
+    ManuscriptVersion,
+)
+
+# ------------------------------------------------------------
+# Originality
+# ------------------------------------------------------------
+
 from app.models.originality_reports import OriginalityReport
 from app.models.similarity_match import SimilarityMatch
 from app.models.citation_analysis import CitationAnalysis
+
+# ------------------------------------------------------------
+# Conference Intelligence
+# ------------------------------------------------------------
 
 from app.models.conference import (
     Conference,
     ConferenceSource
 )
+
+# ------------------------------------------------------------
+# Notifications
+# ------------------------------------------------------------
 
 from app.models.notification import Notification
 
@@ -145,6 +167,8 @@ from app.api.literature.research_gap import (
 # CREATE DATABASE TABLES
 # ============================================================
 
+# This will preserve all existing tables and create the
+# newly imported Research Writing tables if they do not exist.
 Base.metadata.create_all(
     bind=engine
 )
@@ -175,9 +199,10 @@ app.add_middleware(
         "http://127.0.0.1:5174",
     ],
 
-    # Vite may move to 5175/5176/... when another dev server is using
-    # the default port. Allow localhost development ports without
-    # opening cross-origin access to arbitrary external sites.
+    # Vite may move to 5175/5176/... when another dev server
+    # is using the default port. Allow localhost development
+    # ports without opening cross-origin access to arbitrary
+    # external sites.
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
 
     allow_credentials=True,
@@ -393,7 +418,9 @@ def health_check():
             "conference-intelligence",
             "notifications",
             "originality",
-            "citation-analysis"
+            "citation-analysis",
+            "research-writing",
+            "manuscript-versioning"
         ]
     }
 
