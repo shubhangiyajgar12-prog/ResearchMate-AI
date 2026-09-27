@@ -11,6 +11,7 @@ from app.api import improvement
 from app.api import writing
 from app.api import agents
 from app.api import publication
+from app.api.auth import router as auth_router
 
 from app.api.conferences.router import (
     router as conference_router
@@ -191,6 +192,15 @@ app = FastAPI(
     title="ResearchMate AI API",
     description="AI-powered Research Publication Assistant",
     version="1.0.0"
+)
+
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+# Signup and login routes for ResearchMate user accounts.
+app.include_router(
+    auth_router
 )
 
 

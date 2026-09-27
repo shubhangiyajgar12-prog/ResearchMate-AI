@@ -5,6 +5,8 @@ import {
   NavLink,
   Routes,
   Route,
+  Navigate,
+  useLocation,
   useNavigate,
 } from "react-router-dom";
 
@@ -42,8 +44,64 @@ import WritingPage from "./WritingPage";
 import ReviewPage from "./ReviewPage";
 import PublicationAssistant from "./PublicationAssistant";
 import ConferencePage from "./ConferencePage";
+import AuthPage from "./AuthPage";
+import "./auth.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+
+const AUTH_TOKEN_KEY = "researchmate:accessToken";
+const AUTH_USER_KEY = "researchmate:user";
+
+const getAuthToken = () =>
+  window.localStorage.getItem(AUTH_TOKEN_KEY) ||
+  window.sessionStorage.getItem(AUTH_TOKEN_KEY) ||
+  "";
+
+const getAuthUser = () => {
+  try {
+    const raw =
+      window.localStorage.getItem(AUTH_USER_KEY) ||
+      window.sessionStorage.getItem(AUTH_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const clearAuth = () => {
+  window.localStorage.removeItem(AUTH_TOKEN_KEY);
+  window.localStorage.removeItem(AUTH_USER_KEY);
+  window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  window.sessionStorage.removeItem(AUTH_USER_KEY);
+};
+
+// Attach the signed-in user's token to every ResearchMate API call.
+// Existing module fetch calls therefore continue working without changing
+// every page individually.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const url = typeof input === "string" ? input : input?.url || "";
+  const isResearchMateApi = url.startsWith(API_BASE_URL);
+  const isAuthEndpoint = isResearchMateApi && url.includes("/auth/");
+
+  if (!isResearchMateApi || isAuthEndpoint) {
+    return nativeFetch(input, init);
+  }
+
+  const token = getAuthToken();
+  const headers = new Headers(init.headers || (typeof input !== "string" ? input.headers : undefined));
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  return nativeFetch(input, { ...init, headers }).then((response) => {
+    if (response.status === 401) {
+      clearAuth();
+      if (window.location.pathname !== "/login" && window.location.pathname !== "/signup") {
+        window.location.assign("/login");
+      }
+    }
+    return response;
+  });
+};
 
 const SELECTED_PROJECT_STORAGE_KEY = "researchmate:selectedProjectId";
 
@@ -670,11 +728,16 @@ function Topbar({ setMobileOpen }) {
           {notificationCount > 0 && <span>{notificationCount > 9 ? "9+" : notificationCount}</span>}
         </button>
 
-        <button className="profile-button">
-          <div className="profile-avatar">R</div>
-
-          <span>Researcher</span>
-
+        <button
+          className="profile-button"
+          onClick={() => {
+            clearAuth();
+            window.location.assign("/login");
+          }}
+          title="Sign out"
+        >
+          <div className="profile-avatar">{(getAuthUser()?.name || "R").charAt(0).toUpperCase()}</div>
+          <span>{getAuthUser()?.name || "Researcher"}</span>
           <ChevronDown size={15} />
         </button>
       </div>
@@ -4089,6 +4152,21 @@ function ModulePage({ title, eyebrow, description, icon: Icon }) {
 
 function App() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const location = useLocation();
+  const token = getAuthToken();
+
+  if (!token) {
+    return (
+      <Routes>
+        <Route path="/signup" element={<AuthPage />} />
+        <Route path="*" element={<AuthPage />} />
+      </Routes>
+    );
+  }
+
+  if (location.pathname === "/login" || location.pathname === "/signup") {
+    return <Navigate to="/" replace />;
+  }
 
   return (
     <div className="app-shell">
@@ -4103,19 +4181,10 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
-
             <Route path="/discovery" element={<DiscoveryErrorBoundary><Discovery /></DiscoveryErrorBoundary>} />
-
-            <Route
-              path="/literature"
-              element={<LiteraturePage />}
-            />
-
+            <Route path="/literature" element={<LiteraturePage />} />
             <Route path="/writing" element={<ModuleErrorBoundary><WritingPage /></ModuleErrorBoundary>} />
-
-
             <Route path="/review" element={<ModuleErrorBoundary><ReviewPage /></ModuleErrorBoundary>} />
-
             <Route path="/publication" element={<ModuleErrorBoundary><PublicationAssistant /></ModuleErrorBoundary>} />
             <Route path="/conferences" element={<ConferencePage />} />
           </Routes>
