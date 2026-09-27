@@ -38,13 +38,33 @@ import {
 import "./index.css";
 import "./literature_clean_ui.css";
 import "./discovery_refinements.css";
-import OriginalityPage from "./OriginalityPage";
 import WritingPage from "./WritingPage";
 import ReviewPage from "./ReviewPage";
 import PublicationAssistant from "./PublicationAssistant";
 import ConferencePage from "./ConferencePage";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+
+const SELECTED_PROJECT_STORAGE_KEY = "researchmate:selectedProjectId";
+
+const getStoredProjectId = () => {
+  try {
+    return window.localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+};
+
+const setStoredProjectId = (projectId) => {
+  const value = projectId ? String(projectId) : "";
+  try {
+    if (value) window.localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, value);
+    else window.localStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY);
+  } catch {
+    // Local persistence is optional; the current page state remains authoritative.
+  }
+  window.dispatchEvent(new CustomEvent("researchmate:project-change", { detail: { projectId: value } }));
+};
 
 class DiscoveryErrorBoundary extends React.Component {
   constructor(props) {
@@ -415,11 +435,6 @@ const navigation = [
     icon: PenLine,
   },
   {
-    label: "Originality & Citations",
-    path: "/originality",
-    icon: ShieldCheck,
-  },
-  {
     label: "AI Review & Improvement",
     path: "/review",
     icon: MessageSquare,
@@ -473,16 +488,6 @@ const modules = [
   },
   {
     number: "04",
-    title: "Originality & Citations",
-    description:
-      "Check similarity, plagiarism risk and citation quality.",
-    icon: ShieldCheck,
-    color: "amber",
-    capabilities: "5 capabilities",
-    path: "/originality",
-  },
-  {
-    number: "05",
     title: "AI Review & Improvement",
     description:
       "Simulate peer review, understand feedback and improve your paper.",
@@ -492,7 +497,7 @@ const modules = [
     path: "/review",
   },
   {
-    number: "06",
+    number: "05",
     title: "Publication Assistant",
     description:
       "Find suitable venues and manage the path to publication.",
@@ -500,6 +505,16 @@ const modules = [
     color: "green",
     capabilities: "5 capabilities",
     path: "/publication",
+  },
+  {
+    number: "06",
+    title: "Conference Intelligence",
+    description:
+      "Discover relevant conferences and prepare your research for submission.",
+    icon: CalendarDays,
+    color: "blue",
+    capabilities: "5 capabilities",
+    path: "/conferences",
   },
 ];
 
@@ -676,9 +691,9 @@ function ResearchJourney() {
     "Discovery",
     "Literature",
     "Writing",
-    "Originality",
     "AI Review",
     "Publication",
+    "Conference",
   ];
 
   return (
@@ -2764,7 +2779,10 @@ function PDFAnalysisSection() {
 ------------------------------------------------------- */
 
 function LiteraturePage() {
-  const PROJECT_ID = 4;
+  // Literature search is intentionally independent of the project selector.
+  // The active project, when available, still comes from the shared project
+  // selection/localStorage so saving papers continues to work.
+  const [selectedProjectId, setSelectedProjectId] = useState(() => getStoredProjectId());
 
   const [query, setQuery] = useState("");
   const [papers, setPapers] = useState([]);
@@ -2787,13 +2805,34 @@ function LiteraturePage() {
   const [researchGapLoading, setResearchGapLoading] = useState(false);
   const [researchGapError, setResearchGapError] = useState("");
 
+  useEffect(() => {
+    const handleProjectChange = (event) => {
+      const nextId = String(event?.detail?.projectId || "");
+      if (nextId && nextId !== String(selectedProjectId)) setSelectedProjectId(nextId);
+    };
+    window.addEventListener("researchmate:project-change", handleProjectChange);
+    return () => window.removeEventListener("researchmate:project-change", handleProjectChange);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setSavedPapers([]);
+      setSelectedPaperIds([]);
+      return;
+    }
+    loadSavedPapers();
+    setSelectedPaperIds([]);
+    setMatrix(null);
+    setResearchGap(null);
+  }, [selectedProjectId]);
+
 
   const loadSavedPapers = async () => {
     setSavedLoading(true);
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers`
+        `${API_BASE_URL}/literature/projects/${selectedProjectId}/papers`
       );
 
       const data = await parseApiResponse(response);
@@ -2864,17 +2903,13 @@ function LiteraturePage() {
         return refreshed;
       });
 
-      console.info(`[Literature] Loaded ${normalizedPapers.length} saved papers for project ${PROJECT_ID}.`);
+      console.info(`[Literature] Loaded ${normalizedPapers.length} saved papers for project ${selectedProjectId}.`);
     } catch (err) {
       console.error(err);
     } finally {
       setSavedLoading(false);
     }
   };
-
-  useEffect(() => {
-    loadSavedPapers();
-  }, []);
 
   const searchPapers = async (page = 1) => {
     const trimmedQuery = query.trim();
@@ -2950,6 +2985,11 @@ function LiteraturePage() {
     savedPapers.some((saved) => isSamePaper(saved, paper));
 
   const savePaperToProject = async (paper) => {
+    if (!selectedProjectId) {
+      setError("Select a research project before saving a paper.");
+      return;
+    }
+
     if (!paper?.paper_id) {
       setError("This paper does not have a valid paper ID.");
       return;
@@ -2962,14 +3002,14 @@ function LiteraturePage() {
       setError("");
 
       const response = await fetch(
-        `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers`,
+        `${API_BASE_URL}/literature/projects/${selectedProjectId}/papers`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            project_id: PROJECT_ID,
+            project_id: selectedProjectId,
             paper_id: paper.paper_id,
             title: paper.title,
             abstract: paper.abstract || null,
@@ -3019,7 +3059,7 @@ function LiteraturePage() {
       // response to erase the just-saved paper from the UI.
       try {
         const refreshResponse = await fetch(
-          `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers`
+          `${API_BASE_URL}/literature/projects/${selectedProjectId}/papers`
         );
         const refreshData = await parseApiResponse(refreshResponse);
 
@@ -3081,7 +3121,7 @@ function LiteraturePage() {
   const removeSavedPaper = async (paperId) => {
     try {
       const response = await fetch(
-        `${API_BASE_URL}/literature/projects/${PROJECT_ID}/papers/${paperId}`,
+        `${API_BASE_URL}/literature/projects/${selectedProjectId}/papers/${paperId}`,
         {
           method: "DELETE",
         }
@@ -3142,7 +3182,7 @@ function LiteraturePage() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            project_id: PROJECT_ID,
+            project_id: selectedProjectId,
             paper_ids: selectedPaperIds,
           }),
         }
@@ -3185,7 +3225,7 @@ function LiteraturePage() {
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/literature/research-gap?project_id=${PROJECT_ID}`,
+        `${API_BASE_URL}/literature/research-gap?project_id=${selectedProjectId}`,
         {
           method: "POST",
           headers: {
@@ -3684,7 +3724,7 @@ function LiteraturePage() {
             </span>
             <h2>Saved Papers</h2>
             <p>
-              Papers saved to Research Project #{PROJECT_ID}.
+              Papers saved to the selected research project.
               Select papers to generate a literature matrix.
             </p>
           </div>
@@ -4073,7 +4113,6 @@ function App() {
 
             <Route path="/writing" element={<ModuleErrorBoundary><WritingPage /></ModuleErrorBoundary>} />
 
-            <Route path="/originality" element={<ModuleErrorBoundary><OriginalityPage /></ModuleErrorBoundary>} />
 
             <Route path="/review" element={<ModuleErrorBoundary><ReviewPage /></ModuleErrorBoundary>} />
 

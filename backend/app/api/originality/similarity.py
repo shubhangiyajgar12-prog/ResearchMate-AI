@@ -521,3 +521,86 @@ def analyze_originality(
                 f"{str(e)}"
             ),
         )
+
+@router.get(
+    "/projects/{project_id}/analysis",
+)
+def get_latest_analysis(
+    project_id: int,
+    paper_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return the latest saved originality report for this project/paper."""
+    paper = (
+        db.query(LiteraturePaper)
+        .filter(
+            LiteraturePaper.id == paper_id,
+            LiteraturePaper.project_id == project_id,
+        )
+        .first()
+    )
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found for this project.")
+
+    report = (
+        db.query(OriginalityReport)
+        .filter(
+            OriginalityReport.project_id == project_id,
+            OriginalityReport.paper_id == paper_id,
+        )
+        .order_by(OriginalityReport.id.desc())
+        .first()
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="No originality analysis exists for this paper yet.")
+
+    matches = (
+        db.query(SimilarityMatch)
+        .filter(SimilarityMatch.report_id == report.id)
+        .order_by(SimilarityMatch.similarity_score.desc())
+        .all()
+    )
+    return {
+        "id": report.id,
+        "project_id": report.project_id,
+        "paper_id": report.paper_id,
+        "overall_similarity": report.overall_similarity,
+        "exact_similarity": report.exact_similarity,
+        "semantic_similarity": report.semantic_similarity,
+        "lexical_similarity": (report.report_json or {}).get("lexical_similarity", 0.0),
+        "total_matches": report.total_matches,
+        "potential_missing_citations": report.potential_missing_citations,
+        "risk_level": report.risk_level,
+        "target_chunks": (report.report_json or {}).get("target_chunks", 0),
+        "sources_checked": (report.report_json or {}).get("sources_checked", 0),
+        "duplicate_sources_excluded_count": (report.report_json or {}).get("duplicate_sources_excluded_count", 0),
+        "matches": [
+            {
+                "id": m.id,
+                "source_paper_id": m.source_paper_id,
+                "source_title": m.source_title,
+                "source_url": m.source_url,
+                "source_doi": m.source_doi,
+                "matched_text": m.matched_text,
+                "source_text": m.source_text,
+                "similarity_score": m.similarity_score,
+                "match_type": m.match_type,
+                "section": m.section,
+            }
+            for m in matches
+        ],
+        "report_json": report.report_json or {},
+    }
+
+
+@router.get(
+    "/projects/{project_id}/similarity",
+)
+def get_latest_similarity(
+    project_id: int,
+    paper_id: int,
+    db: Session = Depends(get_db),
+):
+    """Alias for the latest project-scoped similarity report."""
+    return get_latest_analysis(project_id=project_id, paper_id=paper_id, db=db)
+

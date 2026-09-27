@@ -138,7 +138,7 @@ def run_citation_analysis(
                 status_code=500,
                 detail=(
                     "Citation analysis completed, but the "
-                    "corresponding originality report could not "
+                    "corresponding originality report could not"
                     "be found after the analysis transaction."
                 ),
             )
@@ -246,6 +246,23 @@ def run_citation_analysis(
                 "citation_coverage",
                 0.0,
             ),
+            "citation_required_claims": result.get("citation_required_claims", 0),
+            "cited_required_claims": result.get("cited_required_claims", 0),
+            "own_research_claims": result.get("own_research_claims", 0),
+            "inherited_context_claims": result.get("inherited_context_claims", 0),
+            "ignored_artifacts": result.get("ignored_artifacts", 0),
+            "risk_level": result.get("risk_level"),
+            # claim_type and citation_status are produced by the
+            # citation service but are not DB columns in the current
+            # CitationAnalysis model. Persist them with the report
+            # summary so GET /citations can restore the same UI data.
+            "findings_metadata": [
+                {
+                    "claim_type": finding.get("claim_type"),
+                    "citation_status": finding.get("citation_status"),
+                }
+                for finding in result.get("findings", [])
+            ],
         }
 
         report.report_json = report_json
@@ -365,3 +382,92 @@ def run_citation_analysis(
                 f"{str(e)}"
             ),
         )
+
+@router.get(
+    "/projects/{project_id}/citations",
+)
+def get_latest_citations(
+    project_id: int,
+    paper_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return the latest citation findings for a project-scopedpaper."""
+    paper = (
+        db.query(LiteraturePaper)
+        .filter(
+            LiteraturePaper.id == paper_id,
+            LiteraturePaper.project_id == project_id,
+        )
+        .first()
+    )
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found for this project.")
+
+    report = (
+        db.query(OriginalityReport)
+        .filter(
+            OriginalityReport.project_id == project_id,
+            OriginalityReport.paper_id == paper_id,
+        )
+        .order_by(OriginalityReport.id.desc())
+        .first()
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="No originality report exists for this paper yet.")
+
+    findings = (
+        db.query(CitationAnalysis)
+        .filter(CitationAnalysis.report_id == report.id)
+        .order_by(CitationAnalysis.id.asc())
+        .all()
+    )
+    summary = (report.report_json or {}).get("citation_analysis", {})
+    findings_metadata = summary.get("findings_metadata", [])
+
+    response_findings = []
+    for index, finding in enumerate(findings):
+        metadata = (
+            findings_metadata[index]
+            if index < len(findings_metadata)
+            and isinstance(findings_metadata[index], dict)
+            else {}
+        )
+
+        response_findings.append(
+            {
+                "id": finding.id,
+                "section": finding.section,
+                "claim_text": finding.claim_text,
+                "claim_type": metadata.get("claim_type"),
+                "citation_present": finding.citation_present,
+                "citation_needed": finding.citation_needed,
+                "citation_status": metadata.get("citation_status"),
+                "confidence": finding.confidence,
+                "suggested_source_id": finding.suggested_source_id,
+                "suggestion_reason": finding.suggestion_reason,
+            }
+        )
+
+    return {
+        "report_id": report.id,
+        "project_id": project_id,
+        "paper_id": paper_id,
+        "total_claims": summary.get("total_claims", len(findings)),
+        "citations_present": summary.get(
+            "citations_present",
+            sum(1 for f in findings if f.citation_present == "yes"),
+        ),
+        "potential_missing_citations": (
+            report.potential_missing_citations
+            if report.potential_missing_citations is not None
+            else summary.get("potential_missing_citations", 0)
+        ),
+        "citation_coverage": summary.get("citation_coverage", 0.0),
+        "citation_required_claims": summary.get("citation_required_claims", 0),
+        "cited_required_claims": summary.get("cited_required_claims", 0),
+        "own_research_claims": summary.get("own_research_claims", 0),
+        "inherited_context_claims": summary.get("inherited_context_claims", 0),
+        "ignored_artifacts": summary.get("ignored_artifacts", 0),
+        "risk_level": summary.get("risk_level"),
+        "findings": response_findings,
+    }

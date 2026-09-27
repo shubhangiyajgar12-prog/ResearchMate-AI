@@ -21,7 +21,7 @@ python -m venv venv
 pip install -r requirements.txt
 copy .env.example .env  # Windows
 # or cp .env.example .env
-uvicorn app.main:app --reload --port 8001
+uvicorn app.main:app --reload --port 8000
 ```
 Set `DATABASE_URL` and `GEMINI_API_KEY` in `.env`.
 
@@ -31,7 +31,7 @@ cd ResearchMate-AI-Complete-Frontend
 npm install
 npm run dev
 ```
-Set `VITE_API_BASE_URL` in `.env` if the backend is not on port 8001.
+Set `VITE_API_BASE_URL` in `.env` if the backend is not on port 8000.
 
 ## Important
 Conference dates and publication facts are not fabricated by the new modules. Records should carry a source and verification status. LLM features require a valid Gemini key; deterministic modules continue to provide non-LLM diagnostics where possible.

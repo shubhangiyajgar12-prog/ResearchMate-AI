@@ -6,7 +6,6 @@ from sqlalchemy import text
 # ============================================================
 # API MODULES
 # ============================================================
-
 from app.api import reviewer
 from app.api import improvement
 from app.api import writing
@@ -34,6 +33,7 @@ from app.database.database import engine, Base
 # ============================================================
 
 from app.models.research_project import ResearchProject
+from app.models.research_topic import ResearchTopic
 from app.models.literature_paper import LiteraturePaper
 from app.models.paper_analysis import PaperAnalysis
 
@@ -44,6 +44,7 @@ from app.models.paper_analysis import PaperAnalysis
 from app.models.manuscript import (
     Manuscript,
     ManuscriptVersion,
+    ManuscriptSection,
 )
 
 # ------------------------------------------------------------
@@ -97,6 +98,14 @@ from app.api.originality.uploaded_manuscript import (
 
 from app.api.projects import (
     router as project_router
+)
+
+# ------------------------------------------------------------
+# Research Topics
+# ------------------------------------------------------------
+
+from app.api.research_topics import (
+    router as research_topics_router
 )
 
 
@@ -220,7 +229,6 @@ app.add_middleware(
 # ------------------------------------------------------------
 # Improvement
 # ------------------------------------------------------------
-
 app.include_router(
     improvement.router
 )
@@ -325,6 +333,16 @@ app.include_router(
 
 
 # ============================================================
+# RESEARCH TOPICS
+# ============================================================
+
+app.include_router(
+    research_topics_router
+)
+
+
+
+# ============================================================
 # RESEARCH DISCOVERY
 # ============================================================
 
@@ -420,6 +438,7 @@ def health_check():
             "originality",
             "citation-analysis",
             "research-writing",
+            "research-topics",
             "manuscript-versioning"
         ]
     }

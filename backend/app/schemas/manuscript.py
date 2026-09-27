@@ -4,6 +4,41 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+SECTION_STATUSES = {
+    "not_started",
+    "generating",
+    "generated",
+    "needs_review",
+    "saved",
+    "error",
+}
+
+
+class ManuscriptSectionResponse(BaseModel):
+    id: int
+    project_id: int
+    manuscript_id: int
+    section_key: str
+    title: str
+    content: str
+    status: str
+    version: int
+    word_count: int
+    character_count: int
+    generated_at: datetime | None
+    updated_at: datetime
+    source_paper_ids: list[int]
+    generation_metadata: dict[str, Any]
+
+    class Config:
+        from_attributes = True
+
+
+class ManuscriptSectionUpdate(BaseModel):
+    content: str = ""
+    source_paper_ids: list[int] = Field(default_factory=list)
+
+
 class ManuscriptCreate(BaseModel):
     paper_id: int | None = None
 
@@ -56,6 +91,8 @@ class ManuscriptResponse(BaseModel):
 
     word_count: int
     character_count: int
+
+    section_details: list[ManuscriptSectionResponse] = Field(default_factory=list)
 
     created_at: datetime
     updated_at: datetime

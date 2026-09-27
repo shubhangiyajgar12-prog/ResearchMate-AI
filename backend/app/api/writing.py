@@ -160,6 +160,9 @@ def _build_project_context(
         ]
     ).lower()
 
+    # Generic deterministic retrieval derived ONLY from the selected
+    # project's stored title, description and research field.
+    # No domain-specific aliases or hardcoded research topics are used.
     stop_words = {
         "research", "study", "studies", "system", "using", "based",
         "analysis", "detection", "detect", "model", "models", "approach",
@@ -169,6 +172,7 @@ def _build_project_context(
         "artificial", "intelligence", "deep", "learning", "application",
         "applications", "development", "design", "proposed", "propose",
         "real", "time", "multi", "class", "technique", "techniques",
+        "based", "problem", "objective", "objectives", "keyword", "keywords",
     }
 
     def clean_tokens(text: str):
@@ -180,32 +184,15 @@ def _build_project_context(
 
     context_tokens = clean_tokens(context_text)
 
-    # Explicit domain aliases prevent generic words such as "existing"
-    # or "detection" from making unrelated papers look relevant.
-    alias_groups = [
-        {"helmet", "helmets", "motorcycle", "motorcyclist", "rider",
-         "riders", "traffic", "road", "roadway", "vehicle"},
-        {"accident", "accidents", "crash", "crashes", "collision",
-         "collisions", "road", "traffic"},
-        {"license", "licence", "plate", "numberplate", "number", "vehicle"},
-        {"yolo", "yolov8", "yolov9", "yolov10", "yolov11"},
-        {"cancer", "tumor", "tumour", "oncology"},
-        {"healthcare", "medical", "clinical", "patient", "disease"},
-        {"weapon", "weapons", "firearm", "gun", "knife", "surveillance"},
-        {"face", "facial", "recognition"},
-    ]
-
-    active_aliases = []
-    for group in alias_groups:
-        if context_tokens.intersection(group):
-            active_aliases.append(group)
-
-    context_phrases = set(
-        re.findall(
-            r"[a-z0-9]+(?:\s+[a-z0-9]+)+",
-            context_text,
-        )
-    )
+    # Build meaningful n-grams from the actual project text. These are
+    # project-derived phrases, not hardcoded domain knowledge.
+    context_words = re.findall(r"[a-z0-9]{3,}", context_text)
+    context_ngrams = set()
+    for n in (2, 3):
+        for i in range(len(context_words) - n + 1):
+            phrase = " ".join(context_words[i:i+n])
+            if all(word not in stop_words for word in context_words[i:i+n]):
+                context_ngrams.add(phrase)
 
     ranked = []
 
@@ -217,63 +204,52 @@ def _build_project_context(
         paper_tokens = clean_tokens(paper_text)
         title_tokens = clean_tokens(title)
 
-        token_overlap = len(context_tokens.intersection(paper_tokens))
-        title_overlap = len(context_tokens.intersection(title_tokens))
+        token_overlap = len(
+            context_tokens.intersection(paper_tokens)
+        )
+        title_overlap = len(
+            context_tokens.intersection(title_tokens)
+        )
 
-        alias_hits = 0
-        for group in active_aliases:
-            if any(term in paper_text for term in group):
-                alias_hits += 1
+        phrase_hits = sum(
+            1
+            for phrase in context_ngrams
+            if phrase in paper_text
+        )
 
-        # Strong exact phrase signals.
-        phrase_hits = 0
-        for phrase in (
-            "helmet violation",
-            "helmet detection",
-            "non-helmeted",
-            "motorcycle rider",
-            "traffic violation",
-            "road accident",
-            "accident detection",
-            "license plate",
-            "number plate",
-            "vehicle detection",
-            "yolov8",
+        exact_title_phrase = 0
+        normalized_project_title = re.sub(
+            r"[^a-z0-9\s]",
+            " ",
+            (project.title or "").lower(),
+        ).strip()
+        if (
+            normalized_project_title
+            and len(normalized_project_title.split()) >= 2
+            and normalized_project_title in title
         ):
-            if phrase in paper_text and phrase in context_text:
-                phrase_hits += 1
-
-        # Exact multi-word overlap from the project title/description.
-        project_terms = re.findall(
-            r"[a-z0-9]+(?:\s+[a-z0-9]+)+",
-            context_text,
-        )
-        exact_phrase_hits = sum(
-            1 for phrase in project_terms
-            if len(phrase.split()) >= 2 and phrase in paper_text
-        )
+            exact_title_phrase = 1
 
         relevance_score = (
-            exact_phrase_hits * 10
+            exact_title_phrase * 30
             + phrase_hits * 8
-            + alias_hits * 7
-            + title_overlap * 4
-            + token_overlap
+            + title_overlap * 5
+            + token_overlap * 2
         )
 
-        # If the project has a recognizable domain, require at least one
-        # strong domain signal. This removes unrelated saved papers from
-        # the AI context while still keeping them safely in the database.
-        strong_domain_match = (
-            alias_hits > 0
-            or exact_phrase_hits > 0
+        # Require meaningful lexical evidence. This prevents unrelated
+        # papers from being silently injected into the LLM context.
+        strong_match = (
+            exact_title_phrase > 0
+            or phrase_hits > 0
             or title_overlap >= 2
+            or token_overlap >= 3
         )
 
         ranked.append(
             (
                 relevance_score,
-                strong_domain_match,
+                strong_match,
                 title_overlap,
                 token_overlap,
                 paper.year or 0,
@@ -295,21 +271,10 @@ def _build_project_context(
     )
 
     if selected_ids is None:
-        # Do not silently feed unrelated papers to the LLM.
         relevant = [
             row for row in ranked
-            if row[0] >= 7 and row[1]
+            if row[0] > 0 and row[1]
         ]
-
-        # If there is no strong match, use only papers with at least two
-        # meaningful project-term overlaps. This is safer than arbitrary
-        # "latest five" fallback.
-        if not relevant:
-            relevant = [
-                row for row in ranked
-                if row[2] >= 2 or row[3] >= 3
-            ]
-
         ranked = relevant
 
     ranked = ranked[:8]
@@ -359,12 +324,19 @@ def _build_project_context(
     for paper in all_project_papers:
         all_literature.append({
             "paper_id": paper.id,
+            "id": paper.id,
+            "project_id": paper.project_id,
+            "provider_paper_id": paper.paper_id,
             "title": paper.title,
             "year": paper.year,
             "authors": paper.authors,
             "doi": paper.doi,
-            "abstract": (paper.abstract or "")[:1000],
+            "abstract": (paper.abstract or "")[:4000],
+            "url": paper.url,
+            "citation_count": paper.citation_count,
             "analysed": paper.id in analysed_ids,
+            "saved": True,
+            "used_as_context": False,
         })
 
     return {
@@ -1533,110 +1505,24 @@ NON-NEGOTIABLE EVIDENCE RULES
 
     generated = (generated or "").strip()
 
-    # Never leave the editor blank just because the external LLM is
-    # temporarily unavailable. The fallback is deliberately factual:
-    # it uses only the stored project fields and supplied literature.
-    # It is a draft scaffold, not invented research evidence.
+    # Accuracy rule: an unavailable/malformed AI response must never be
+    # replaced with generic manuscript prose and presented as generated
+    # research content. Deterministic checks continue independently.
     if not generated:
-        title = project["title"] or "the research topic"
-        field = project["research_field"] or "the stated research field"
-        description = project["description"] or "No detailed project description is stored."
-        paper_titles = [item["title"] for item in literature if item.get("title")]
-
-        if section_name == "introduction":
-            generated = (
-                f"{title} is a research project in {field}. The project description states: {description}. "
-                "The study is positioned around the problem and research direction defined by this project. "
-                "The available project literature provides the documented background for framing the problem and "
-                "identifying areas that require further investigation. "
-                "Based on the current stored evidence, the proposed study should focus on addressing the stated "
-                "research problem while avoiding claims that have not yet been experimentally established. "
-                "The objectives, methodology, and evaluation should therefore be defined and validated as part of "
-                "the subsequent research process."
-            )
-        elif section_name == "problem_statement":
-            generated = (
-                f"The research problem addressed by the project titled '{title}' is defined by the following stored "
-                f"project description: {description}. The available evidence indicates that this problem requires a "
-                "systematic research approach within the stated domain. However, the current project record does not "
-                "contain experimental results that would justify quantitative performance claims. The problem should "
-                "therefore be investigated using a reproducible methodology and evidence-based evaluation."
-            )
-        elif section_name == "research_objectives":
-            generated = (
-                "Proposed research objectives:\n"
-                f"1. Define the research problem and scope for {title}.\n"
-                "2. Review and synthesize relevant existing research identified for the project.\n"
-                "3. Develop a research methodology appropriate to the stated problem and available evidence.\n"
-                "4. Evaluate the proposed approach using explicitly defined and reproducible criteria.\n"
-                "5. Document limitations and evidence-supported directions for future work."
-            )
-        elif section_name == "research_questions":
-            generated = (
-                "Proposed research questions:\n"
-                f"1. What are the main research challenges associated with {title}?\n"
-                "2. What approaches have been reported in the relevant project literature?\n"
-                "3. What limitations or unresolved issues are identified by the available evidence?\n"
-                "4. How can a reproducible research approach address the identified problem without relying on unsupported claims?"
-            )
-        elif section_name == "literature_review":
-            if paper_titles:
-                bullets = "\n".join(f"- {t}" for t in paper_titles)
-                generated = (
-                    "The literature currently saved for this research project provides the evidence base for the review. "
-                    "The relevant papers identified by the project-scoped retrieval process are:\n" + bullets + "\n\n"
-                    "These papers should be compared by their problem setting, methods, evidence, and reported limitations. "
-                    "The current manuscript should not infer experimental findings beyond the information stored in the "
-                    "paper metadata, abstracts, or document-derived analysis."
-                )
-            else:
-                generated = "No project-scoped literature has been saved yet. A literature review should be generated after relevant papers are retrieved and saved under this research project."
-        elif section_name == "research_gap":
-            generated = (
-                "The current project evidence does not by itself establish a novel research gap. The literature should "
-                "be compared for repeated limitations, unresolved problems, methodological differences, and missing "
-                "evaluation evidence. Any resulting gap should be stated as an evidence-supported research direction "
-                "rather than as a guaranteed claim of novelty."
-            )
-        elif section_name == "methodology":
-            generated = (
-                f"The methodology for '{title}' should be designed around the stated research problem: {description}. "
-                "The current project record does not contain enough validated implementation detail to specify a "
-                "complete experimental protocol. Therefore, the final methodology should document the data source, "
-                "preprocessing, proposed method, experimental design, evaluation criteria, and reproducibility details "
-                "once they are explicitly defined and validated."
-            )
-        elif section_name == "references":
-            if paper_titles:
-                generated = "Project-scoped references available from stored metadata:\n" + "\n".join(
-                    f"{i}. {t}" for i, t in enumerate(paper_titles, 1)
-                )
-            else:
-                generated = "No project-scoped references are currently available."
-        elif section_name == "results":
-            generated = "Experimental results are not available in the current project evidence."
-        elif section_name == "discussion":
-            generated = "A substantive discussion cannot be established until validated experimental results are available. The current evidence can be used to discuss the research problem and prior work, but not to claim measured outcomes."
-        elif section_name == "conclusion":
-            generated = (
-                f"The project '{title}' defines a research direction in {field}. At the current stage, the stored "
-                "evidence supports formulation of the research problem and planning of the investigation, but does not "
-                "support claims about completed experiments or measured performance."
-            )
-        elif section_name == "future_work":
-            generated = "Future work should validate the proposed methodology experimentally, document reproducible evaluation evidence, compare the approach with relevant baselines, and address limitations identified during the research process."
-        elif section_name == "limitations":
-            generated = "Current limitations include the information that is explicitly available in the project record and saved literature. Experimental limitations, dataset limitations, and performance limitations should be added only after they are observed and documented."
-        else:
-            generated = (
-                f"Draft for {section_name.replace('_', ' ').title()} based on the stored project context for '{title}'. "
-                "The section should be completed using validated project-specific evidence and should not introduce unsupported facts or numerical claims."
-            )
+        # Do not fabricate a manuscript section when the LLM is unavailable.
+        # Preserve the real service error so the frontend/logs can distinguish
+        # an API-key/model/rate-limit failure from a project-data failure.
+        detail = (
+            "AI writing is temporarily unavailable. "
+            "No unsupported manuscript content was generated."
+        )
+        if ai_error:
+            detail += f" Cause: {ai_error}"
+        raise HTTPException(status_code=503, detail=detail)
 
     response_note = (
-        "AI-generated draft grounded in project-scoped evidence."
-        if not ai_error
-        else "Deterministic evidence-only fallback draft was used because the configured AI service did not return content. Check the Gemini configuration before final publication."
+        "AI-generated draft grounded in project-scoped evidence. "
+        "Review every claim against the cited source evidence before publication."
     )
 
     return {
@@ -1660,7 +1546,7 @@ NON-NEGOTIABLE EVIDENCE RULES
                 "context and deterministically relevant literature."
             ),
         },
-        "generation_mode": "ai" if not ai_error else "deterministic_fallback",
+        "generation_mode": "ai",
         "evidence_note": response_note + " Review all generated text against the underlying evidence before using it in the final manuscript.",
     }
 

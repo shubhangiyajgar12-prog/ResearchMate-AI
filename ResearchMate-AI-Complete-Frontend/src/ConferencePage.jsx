@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from "react";
 import {CalendarDays, ExternalLink, Search, ShieldCheck} from "lucide-react";
-const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001";
+const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 export default function ConferencePage(){
  const [items,setItems]=useState([]),[q,setQ]=useState(""),[category,setCategory]=useState("All"),[categories,setCategories]=useState([]),[error,setError]=useState("");
  const load=async()=>{try{const u=new URL(`${API}/conferences`); if(q)u.searchParams.set("query",q);if(category!=="All")u.searchParams.set("category",category);const r=await fetch(u);if(!r.ok)throw Error("Conference service unavailable");setItems(await r.json());}catch(e){setError(e.message)}};

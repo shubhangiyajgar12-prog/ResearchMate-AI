@@ -225,7 +225,7 @@ async def analyze_saved_paper_pdf(
         try:
             form = await request.form()
             candidate = form.get("file")
-            if isinstance(candidate, UploadFile):
+            if candidate is not None and hasattr(candidate, "filename") and hasattr(candidate, "read"):
                 file = candidate
         except Exception:
             file = None
